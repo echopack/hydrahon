@@ -1,0 +1,180 @@
+use hydrahon::{DateTime, Value, Insert, Mysql, Postgres, Decimal, Bytes, Date, Time};
+
+test datetime_from_unix
+{
+    $epoch = DateTime(unix: 0);
+    assert($epoch->year == 1970 && $epoch->month == 1 && $epoch->day == 1 && $epoch->hour == 0);
+    $leap = DateTime(unix: 951782400);
+    assert($leap->year == 2000 && $leap->month == 2 && $leap->day == 29);
+    $before = DateTime(unix: -1);
+    assert($before->year == 1969 && $before->month == 12 && $before->day == 31 && $before->hour == 23 && $before->minute == 59 && $before->second == 59);
+    $later = DateTime(unix: 1700000000);
+    assert($later->year == 2023 && $later->month == 11 && $later->day == 14 && $later->hour == 22 && $later->minute == 13 && $later->second == 20);
+}
+
+test binder_sees_every_kind
+{
+    $u = UserTable();
+    $p = PostTable();
+    $q = Insert(into: $u)
+        ->row([
+            $u->id => 1,
+            $u->name => 'n',
+            $u->email => null,
+            $u->active => true,
+            $u->age => 4,
+            $u->createdAt => DateTime(unix: 0),
+        ]);
+    assert(kinds(render<Mysql, Insert>($q)) == 'I:nNBIt');
+    $d = Insert(into: $p)->row([$p->price => Decimal('9.50')]);
+    assert(kinds(render<Mysql, Insert>($d)) == 'D');
+}
+
+test value_null
+{
+    Value $n = .none();
+    Value $x = 3;
+    assert($n->isNull());
+    assert(!$x->isNull());
+}
+
+/**
+ * The binder letters of a single value.
+ */
+function letter(Value $v) : string
+{
+    array<Value> $one = [$v];
+    return kinds(hydrahon::Sql('?', $one));
+}
+
+test every_conversion
+{
+    int32 $i32 = -3;
+    uint32 $u32 = 3;
+    int64 $i64 = 1;
+    uint64 $u64 = 18446744073709551615;
+    float64 $f = 0.25;
+    assert(letter(true) == 'B');
+    assert(letter($i32) == 'I');
+    assert(letter($i64) == 'I');
+    assert(letter($u32) == 'U');
+    assert(letter($u64) == 'U');
+    assert(letter($f) == 'F');
+    assert(letter(Decimal('1.10')) == 'D');
+    assert(letter('text') == ':text');
+    assert(letter(Bytes('b')) == 'X');
+    assert(letter(Date(2024, 1, 1)) == 'd');
+    assert(letter(DateTime(2024, 1, 1)) == 't');
+    assert(letter(Time()) == 'T');
+}
+
+test nullable_conversions
+{
+    bool? $b = null;
+    int64? $i = null;
+    uint64? $u = null;
+    float64? $f = null;
+    Decimal? $d = null;
+    string? $s = null;
+    Bytes? $x = null;
+    Date? $day = null;
+    DateTime? $at = null;
+    Time? $t = null;
+    array<Value> $nulls = [$b, $i, $u, $f, $d, $s, $x, $day, $at, $t];
+    foreach ($nulls as const &$v) {
+        assert($v->isNull());
+    }
+    assert(kinds(hydrahon::Sql('', $nulls)) == 'NNNNNNNNNN');
+    bool? $b1 = false;
+    int64? $i1 = 1;
+    uint64? $u1 = 1;
+    float64? $f1 = 1.0;
+    Decimal? $d1 = Decimal('1');
+    string? $s1 = 'v';
+    Bytes? $x1 = Bytes('x');
+    Date? $day1 = Date();
+    DateTime? $at1 = DateTime();
+    Time? $t1 = Time();
+    array<Value> $set = [$b1, $i1, $u1, $f1, $d1, $s1, $x1, $day1, $at1, $t1];
+    foreach ($set as const &$v) {
+        assert(!$v->isNull());
+    }
+    assert(kinds(hydrahon::Sql('', $set)) == 'BIUFD:vXdtT');
+}
+
+/**
+ * A binder that keeps the values themselves.
+ */
+struct Keep : hydrahon::Binder
+{
+    array<string> $seen = array<string>();
+
+    function none() : void { $this->seen[] = 'null'; }
+    function bool(bool $v) : void { $this->seen[] = str::from($v); }
+    function int(int64 $v) : void { $this->seen[] = str::from($v); }
+    function uint(uint64 $v) : void { $this->seen[] = str::from($v); }
+    function float(float64 $v) : void { $this->seen[] = str::from($v); }
+    function decimal(const Decimal& $v) : void { $this->seen[] = $v->text; }
+    function text(const string& $v) : void { $this->seen[] = $v; }
+    function bytes(const Bytes& $v) : void { $this->seen[] = $v->data; }
+    function date(const Date& $v) : void { $this->seen[] = "{$v->year}-{$v->month}-{$v->day}"; }
+    function datetime(const DateTime& $v) : void { $this->seen[] = "{$v->year}-{$v->month}-{$v->day} {$v->hour}:{$v->minute}:{$v->second}.{$v->micro}"; }
+    function time(const Time& $v) : void { $this->seen[] = "{$v->negative} {$v->hours}:{$v->minute}:{$v->second}.{$v->micro}"; }
+}
+
+test binder_gets_values_in_order
+{
+    $k = KindTable();
+    $q = hydrahon::Select(from: $k)->where(
+        $k->s == 'a' && $k->i == -5 && $k->u == 18446744073709551615 && $k->d == Decimal('-0.50')
+        && $k->x == Bytes('raw') && $k->day == Date(2024, 2, 29) && $k->at == DateTime(2024, 2, 29, 23, 59, 58, 999999)
+        && $k->time == Time(true, 838, 59, 59, 0) && $k->b == true
+    );
+    $s = render<Postgres, hydrahon::Select>($q);
+    Keep $keep = Keep();
+    $s->bind($keep);
+    assert($keep->seen->count() == 9);
+    assert($keep->seen[0] == 'a');
+    assert($keep->seen[1] == '-5');
+    assert($keep->seen[2] == '18446744073709551615');
+    assert($keep->seen[3] == '-0.50');
+    assert($keep->seen[4] == 'raw');
+    assert($keep->seen[5] == '2024-2-29');
+    assert($keep->seen[6] == '2024-2-29 23:59:58.999999');
+    assert($keep->seen[7] == 'true 838:59:59.0');
+    assert($keep->seen[8] == 'true');
+}
+
+test datetime_calendar_edges
+{
+    // the last day of a century year that is not a leap year
+    $a = DateTime(unix: 4107456000);
+    assert($a->year == 2100 && $a->month == 2 && $a->day == 28);
+    $b = DateTime(unix: 4107542400);
+    assert($b->year == 2100 && $b->month == 3 && $b->day == 1);
+    // 1900 was not a leap year either, before the epoch
+    $c = DateTime(unix: -2203891200);
+    assert($c->year == 1900 && $c->month == 3 && $c->day == 1);
+    // the end of 1999, then the first second of 2000
+    $d = DateTime(unix: 946684799);
+    assert($d->year == 1999 && $d->month == 12 && $d->day == 31 && $d->hour == 23 && $d->minute == 59 && $d->second == 59);
+    $e = DateTime(unix: 946684800);
+    assert($e->year == 2000 && $e->month == 1 && $e->day == 1 && $e->hour == 0 && $e->micro == 0);
+    // a whole day before the epoch lands on midnight, not 24:00
+    $f = DateTime(unix: -86400);
+    assert($f->year == 1969 && $f->month == 12 && $f->day == 31 && $f->hour == 0 && $f->second == 0);
+    // the 32-bit rollover
+    $g = DateTime(unix: 2147483648);
+    assert($g->year == 2038 && $g->month == 1 && $g->day == 19 && $g->hour == 3 && $g->minute == 14 && $g->second == 8);
+    // far before the epoch, across a 400-year era
+    $h = DateTime(unix: -12219292800);
+    assert($h->year == 1582 && $h->month == 10 && $h->day == 15);
+}
+
+test datetime_defaults
+{
+    $d = DateTime(2024, 5);
+    assert($d->year == 2024 && $d->month == 5 && $d->day == 0 && $d->hour == 0 && $d->micro == 0);
+    $t = Time();
+    assert(!$t->negative && $t->hours == 0);
+}

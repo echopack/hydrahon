@@ -1,0 +1,200 @@
+use hydrahon::{Mysql, Postgres, Sqlite, Feature, Problem, Error, UpsertStyle, Select, Insert, Delete, Table, Term};
+
+/**
+ * What `$d` writes for `$ident`.
+ */
+function quoted<D : hydrahon::Dialect>(const D& $d, const string& $ident) : string
+{
+    str::text $out = str::text();
+    $d->quote($ident, $out);
+    return $out->take();
+}
+
+test quoting
+{
+    Mysql $m = Mysql();
+    Postgres $p = Postgres();
+    Sqlite $s = Sqlite();
+    assert(quoted($m, 'users') == '`users`');
+    assert(quoted($p, 'users') == '"users"');
+    assert(quoted($s, 'users') == '"users"');
+    assert(quoted($m, 'a`b') == '`a``b`');
+    assert(quoted($p, 'a"b') == '"a""b"');
+    assert(quoted($p, '') == '""');
+    // a NUL byte would end the identifier early in a C client, so it is dropped
+    string $nul = 'a';
+    $nul->push(0);
+    $nul->append('b');
+    assert(quoted($m, $nul) == '`ab`');
+    assert(quoted($p, $nul) == '"ab"');
+}
+
+test placeholders
+{
+    $k = KindTable();
+    $c = $k->i == 1 && $k->i == 2 && $k->i == 3 && $k->i == 4 && $k->i == 5 && $k->i == 6 && $k->i == 7 && $k->i == 8 && $k->i == 9 && $k->i == 10 && $k->i == 11;
+    string $pg = cond($c);
+    assert($pg->ends('"k"."i" = $9 AND "k"."i" = $10 AND "k"."i" = $11'));
+    $q = Select(from: $k)->where($c);
+    assert(text<Mysql, Select>($q)->ends('`k`.`i` = ? AND `k`.`i` = ?'));
+    assert(text<Sqlite, Select>($q)->ends('"k"."i" = ? AND "k"."i" = ?'));
+}
+
+test feature_matrix
+{
+    Mysql $m = Mysql();
+    Postgres $p = Postgres();
+    Sqlite $s = Sqlite();
+    assert(!$m->supports(.returning) && !$m->supports(.fullJoin) && !$m->supports(.insertWith));
+    assert($m->supports(.updateLimit) && $m->supports(.deleteOrder) && $m->supports(.rightJoin) && $m->supports(.upsert) && $m->supports(.compoundOrder));
+    assert($p->supports(.returning) && $p->supports(.fullJoin) && $p->supports(.insertWith) && $p->supports(.compoundOrder));
+    assert(!$p->supports(.updateLimit) && !$p->supports(.updateOrder) && !$p->supports(.deleteLimit) && !$p->supports(.deleteOrder));
+    assert($s->supports(.returning) && $s->supports(.upsert) && $s->supports(.rightJoin) && $s->supports(.insertWith));
+    assert(!$s->supports(.compoundOrder) && !$s->supports(.updateLimit) && !$s->supports(.deleteOrder));
+    assert($m->upsert() == UpsertStyle::duplicateKey);
+    assert($p->upsert() == UpsertStyle::onConflict);
+    assert($s->upsert() == UpsertStyle::onConflict);
+}
+
+test sqlite_versions
+{
+    // each feature turns on at the release that brought it
+    Sqlite $v3_23 = Sqlite(3023999);
+    Sqlite $v3_24 = Sqlite(3024000);
+    Sqlite $v3_34 = Sqlite(3034999);
+    Sqlite $v3_35 = Sqlite(3035000);
+    Sqlite $v3_38 = Sqlite(3038999);
+    Sqlite $v3_39 = Sqlite(3039000);
+    assert(!$v3_23->supports(.upsert) && $v3_24->supports(.upsert));
+    assert(!$v3_34->supports(.returning) && $v3_35->supports(.returning));
+    assert(!$v3_38->supports(.rightJoin) && $v3_39->supports(.rightJoin));
+    assert(!$v3_38->supports(.fullJoin) && $v3_39->supports(.fullJoin));
+    $u = UserTable();
+    $p = PostTable();
+    $right = Select(from: $u)->join(right: $p, on: $p->userId == $u->id);
+    assert(str::from($right->sql($v3_38)->failure()) == 'unsupported by this dialect: RIGHT JOIN');
+    assert($right->sql($v3_39)->has_value());
+    $gone = Delete(from: $u)->where($u->id == 1)->returning([$u->id]);
+    assert(str::from($gone->sql($v3_34)->failure()) == 'unsupported by this dialect: RETURNING');
+    assert($gone->sql($v3_35)->has_value());
+}
+
+test feature_messages
+{
+    assert(str::from(Feature::returning) == 'RETURNING');
+    assert(str::from(Feature::updateLimit) == 'UPDATE with LIMIT');
+    assert(str::from(Feature::updateOrder) == 'UPDATE with ORDER BY');
+    assert(str::from(Feature::deleteLimit) == 'DELETE with LIMIT');
+    assert(str::from(Feature::deleteOrder) == 'DELETE with ORDER BY');
+    assert(str::from(Feature::rightJoin) == 'RIGHT JOIN');
+    assert(str::from(Feature::fullJoin) == 'FULL JOIN');
+    assert(str::from(Feature::upsert) == 'upsert');
+    assert(str::from(Feature::compoundOrder) == 'ORDER BY or LIMIT inside a UNION branch');
+    assert(str::from(Feature::insertWith) == 'WITH before INSERT');
+}
+
+test problem_messages
+{
+    assert(str::from(Problem::noRows) == 'insert without rows');
+    assert(str::from(Problem::noAssignments) == 'update without assignments');
+    assert(str::from(Problem::rowShape) == 'insert rows set different columns');
+    assert(str::from(Problem::duplicateColumn) == 'a column is set twice');
+    assert(str::from(Problem::notAColumn) == 'an assignment target is not a column');
+    assert(str::from(Problem::foreignColumn) == 'a column belongs to another table');
+    assert(str::from(Problem::conflictTarget) == 'conflict update needs a target on this dialect');
+    assert(str::from(Problem::conflictAction) == 'conflict without update or ignore');
+    assert(str::from(Problem::rawParams) == 'raw placeholders and params differ in count');
+    Error $e = .unsupported(.fullJoin);
+    assert(str::from($e) == 'unsupported by this dialect: FULL JOIN');
+    Error $i = .invalid(.noRows);
+    assert(str::from($i) == 'invalid statement: insert without rows');
+}
+
+test first_error_sticks
+{
+    // rendering carries on after a failure, but the report is the first one
+    $u = UserTable();
+    $p = PostTable();
+    $q = Select(from: $u)->join(full: $p, on: $p->userId == $u->id)->where(hydrahon::raw<bool>('?', []));
+    assert(fails<Mysql, Select>($q) == 'unsupported by this dialect: FULL JOIN');
+    assert(fails<Postgres, Select>($q) == 'invalid statement: raw placeholders and params differ in count');
+}
+
+test custom_dialect
+{
+    // a dialect of one's own only answers the questions; the renderer is shared
+    $u = UserTable();
+    $q = Select(from: $u)->fields([$u->name, fn::length($u->name)])->where($u->id == 1 && $u->email == 'x')->offset(3);
+    Colon $c = Colon();
+    $s = guard $q->sql($c);
+    assert($s->text == 'SELECT [users].[name], LEN([users].[name]) FROM [users] WHERE [users].[id] = :1 AND [users].[email] = :2 OFFSET 3');
+    $up = Insert(into: $u)->row([$u->email => 'a'])->conflict([$u->email])->update(inserted: [$u->name]);
+    $i = guard $up->sql($c);
+    assert($i->text == 'INSERT INTO [users] ([email]) VALUES (:1) ON CONFLICT ([email]) DO UPDATE SET [name] = incoming.[name]');
+}
+
+use hydrahon::fn;
+
+struct Colon : hydrahon::Dialect
+{
+    public const function quote(const string& $ident, str::text& $out) : void
+    {
+        $out->push(91);
+        $out->append($ident);
+        $out->push(93);
+    }
+
+    public const function placeholder(usize $n, str::text& $out) : void
+    {
+        $out->push(58);
+        $out->append(str::from($n));
+    }
+
+    public const function unlimited(str::text& $out) : void
+    {
+    }
+
+    public const function supports(Feature $f) : bool
+    {
+        return true;
+    }
+
+    public const function upsert() : UpsertStyle
+    {
+        return .onConflict;
+    }
+
+    public const function excluded(const string& $column, str::text& $out) : void
+    {
+        $out->append('incoming.');
+        $this->quote($column, $out);
+    }
+
+    public const function incoming(str::text& $out) : void
+    {
+    }
+
+    public const function truncate(str::text& $out) : void
+    {
+        $out->append('TRUNCATE ');
+    }
+
+    public const function call(hydrahon::Function $fn, str::text& $out) : void
+    {
+        if ($fn == hydrahon::Function::length) {
+            $out->append('LEN');
+            return;
+        }
+        $out->append('X');
+    }
+
+    public const function symbol(hydrahon::Binary $op, str::text& $out) : void
+    {
+        $out->append($op->symbol());
+    }
+
+    public const function syntax() : hydrahon::Syntax
+    {
+        return hydrahon::Syntax();
+    }
+}

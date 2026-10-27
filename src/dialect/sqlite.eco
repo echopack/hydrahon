@@ -1,0 +1,85 @@
+namespace hydrahon;
+
+/**
+ * SQLite. `$version` is `sqlite3_libversion_number()` of the library that runs the SQL: upserts
+ * need 3.24, RETURNING 3.35, RIGHT and FULL joins 3.39.
+ */
+public struct Sqlite : Dialect
+{
+    public uint32 $version = 3045000;
+
+    public const function quote(const string& $ident, str::text& $out) : void
+    {
+        quoteWith($ident, 34, $out);
+    }
+
+    public const function placeholder(usize $n, str::text& $out) : void
+    {
+        $out->push(63);
+    }
+
+    public const function unlimited(str::text& $out) : void
+    {
+        $out->append(' LIMIT -1');
+    }
+
+    public const function supports(Feature $f) : bool
+    {
+        return match ($f) {
+            Feature::updateLimit => false,
+            Feature::updateOrder => false,
+            Feature::deleteLimit => false,
+            Feature::deleteOrder => false,
+            Feature::compoundOrder => false,
+            Feature::upsert => $this->version >= 3024000,
+            Feature::returning => $this->version >= 3035000,
+            Feature::rightJoin => $this->version >= 3039000,
+            Feature::fullJoin => $this->version >= 3039000,
+            Feature::insertWith => true,
+            Feature::updateWith => true,
+            Feature::deleteWith => true,
+            Feature::starCount => true,
+        };
+    }
+
+    public const function upsert() : UpsertStyle
+    {
+        return .onConflict;
+    }
+
+    public const function excluded(const string& $column, str::text& $out) : void
+    {
+        $out->append('excluded.');
+        $this->quote($column, $out);
+    }
+
+    public const function incoming(str::text& $out) : void
+    {
+    }
+
+    public const function truncate(str::text& $out) : void
+    {
+        // an unconditional delete is what sqlite's truncate optimization runs
+        $out->append('DELETE FROM ');
+    }
+
+    public const function call(Function $fn, str::text& $out) : void
+    {
+        if ($fn == Function::length) {
+            $out->append('LENGTH');
+            return;
+        }
+        standardName($fn, $out);
+    }
+
+    public const function symbol(Binary $op, str::text& $out) : void
+    {
+        $out->append($op->symbol());
+    }
+
+    public const function syntax() : Syntax
+    {
+        // no escape character in LIKE unless ESCAPE names one
+        return Syntax();
+    }
+}

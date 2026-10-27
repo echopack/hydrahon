@@ -1,0 +1,132 @@
+/**
+ * The pipeline `hydragen` runs in a module directory: the decls pass, the
+ * checks, the file.
+ *
+ * The decls pass defines HYDRAHON_NOGEN, which the module's manifest uses
+ * to leave `.hydrahon/` out, so a stale generated file can never stop the
+ * next one from being written. Code that uses the generated handles fails
+ * to compile in that pass; echoc still prints every declaration, so its
+ * complaints are kept back unless the pass printed nothing usable.
+ */
+
+namespace hydragen;
+
+use std::io;
+
+public enum Failure
+{
+    case tool(string $status, string $stderr);
+    case input(string $message);
+    case problems(int32 $count);
+    case stale;
+
+    public const function message() : string
+    {
+        return match ($this) {
+            Failure::tool($status, $stderr) => "echoc -p decls failed ({$status}):\n{$stderr}",
+            Failure::input($message) => $message,
+            Failure::problems($count) => "{$count} problem(s) in #[hydrahon::...] declarations",
+            Failure::stale => '.hydrahon/tables.eco is out of date; run hydragen',
+        };
+    }
+}
+
+public class Generator
+{
+    public string $echoc = 'echoc';
+    // the manifest check, the wiring hint and the messages spell out `.hydrahon/` as well
+    public const string $target = '.hydrahon/tables.eco';
+    public bool $quiet = false;
+
+    /**
+     * Read the module and render the generated file, or say why not.
+     */
+    public function render() : result<string, Failure>
+    {
+        string $manifest = Sys::read('module.eco');
+        if ($manifest->empty()) {
+            return .error(.input('no module.eco here; run hydragen in the module that declares the tables'));
+        }
+        if ($manifest->contains('.hydrahon/') == false || $manifest->contains('HYDRAHON_NOGEN') == false) {
+            return .error(.input(Generator::wiring()));
+        }
+        json::Value $decls = guard $this->decls() else ($e) {
+            return .error($e);
+        }
+        Schema $schema = Schema::read($decls);
+        if ($schema->problems->count() > 0) {
+            foreach ($schema->problems as const &$p) {
+                io::eprintln("error: {$p}");
+            }
+            return .error(.problems($schema->problems->count() as int32));
+        }
+        $this->say("hydragen  {$schema->tables->count()} table(s)");
+        return .ok(Emitter($schema)->render());
+    }
+
+    /**
+     * Write the generated file. Unchanged content is left alone, so echoc's
+     * cache stays warm.
+     */
+    public function generate() : status<Failure>
+    {
+        string $text = guard $this->render() else ($e) {
+            return .error($e);
+        }
+        result<bool, io::ioerror> $made = io::mkdir('.hydrahon');
+        if ($made->failed() && $made->failure()->exists() == false) {
+            return .error(.input('could not create .hydrahon/'));
+        }
+        if (Sys::put($this->target, $text) == false) {
+            return .error(.input("could not write {$this->target}"));
+        }
+        $this->say("wrote     {$this->target}");
+        return .ok;
+    }
+
+    /**
+     * Whether the generated file is what generating would write now.
+     */
+    public function check() : status<Failure>
+    {
+        string $text = guard $this->render() else ($e) {
+            return .error($e);
+        }
+        if (Sys::read($this->target) != $text) {
+            return .error(.stale);
+        }
+        $this->say("current   {$this->target}");
+        return .ok;
+    }
+
+    private function decls() : result<json::Value, Failure>
+    {
+        array<string> $args = ['build', '-p', 'decls', '--define', 'HYDRAHON_NOGEN', '-o', 'ecobuild/hydragen-decls'];
+        std::process::output $run = guard std::process::command($this->echoc, $args)->output() else ($e) {
+            return .error(.input("could not run {$this->echoc}: {$e->message()}; pass --echoc <path> or set $ECHOC"));
+        }
+        json::Value $decls = guard json::parse($run->stdout) else {
+            return .error(.tool("{$run->status}", $run->stderr));
+        }
+        if (Json::items($decls, 'modules')->count() == 0) {
+            return .error(.tool("{$run->status}", $run->stderr));
+        }
+        return .ok($decls);
+    }
+
+    private function say(const string& $text) : void
+    {
+        if ($this->quiet == false) {
+            io::println($text);
+        }
+    }
+
+    private static function wiring() : string
+    {
+        string $out = "module.eco does not include .hydrahon/ behind HYDRAHON_NOGEN. add:\n\n";
+        $out->append("#[if: !HYDRAHON_NOGEN]\n");
+        $out->append("#[sources: \".hydrahon/*.eco\"]\n");
+        $out->append('#[end]');
+        return $out;
+    }
+}

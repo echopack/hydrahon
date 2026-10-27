@@ -1,0 +1,101 @@
+namespace hydrahon;
+
+/**
+ * MySQL 8.0 and later, or MariaDB with `$mariadb`. Upserts refer to the incoming row as
+ * `VALUES(col)`, which every version understands; `$rowAlias` switches to `AS new ... new.col`,
+ * which MySQL 8.0.19 and later prefer and MariaDB refuses, so MariaDB keeps `VALUES(col)`.
+ * Raw SQL is read the way the default SQL mode reads it, with backslash escapes in strings.
+ */
+public struct Mysql : Dialect
+{
+    public bool $rowAlias = false;
+
+    /**
+     * The server is MariaDB, which takes WITH only before SELECT.
+     */
+    public bool $mariadb = false;
+
+    public const function quote(const string& $ident, str::text& $out) : void
+    {
+        quoteWith($ident, 96, $out);
+    }
+
+    public const function placeholder(usize $n, str::text& $out) : void
+    {
+        $out->push(63);
+    }
+
+    public const function unlimited(str::text& $out) : void
+    {
+        $out->append(' LIMIT 18446744073709551615');
+    }
+
+    public const function supports(Feature $f) : bool
+    {
+        return match ($f) {
+            Feature::returning => false,
+            Feature::fullJoin => false,
+            // WITH only goes before INSERT ... SELECT, inside it
+            Feature::insertWith => false,
+            Feature::updateWith => !$this->mariadb,
+            Feature::deleteWith => !$this->mariadb,
+            // a derived table may not repeat a column name, which `*` across a join does
+            Feature::starCount => false,
+            else => true,
+        };
+    }
+
+    public const function upsert() : UpsertStyle
+    {
+        return .duplicateKey;
+    }
+
+    public const function excluded(const string& $column, str::text& $out) : void
+    {
+        if ($this->aliased()) {
+            $out->append('`new`.');
+            $this->quote($column, $out);
+            return;
+        }
+        $out->append('VALUES(');
+        $this->quote($column, $out);
+        $out->push(41);
+    }
+
+    public const function incoming(str::text& $out) : void
+    {
+        if ($this->aliased()) {
+            $out->append(' AS `new`');
+        }
+    }
+
+    public const function truncate(str::text& $out) : void
+    {
+        $out->append('TRUNCATE TABLE ');
+    }
+
+    public const function call(Function $fn, str::text& $out) : void
+    {
+        standardName($fn, $out);
+    }
+
+    public const function symbol(Binary $op, str::text& $out) : void
+    {
+        if ($op == Binary::quot) {
+            // `/` yields a DECIMAL fraction here, even between integers
+            $out->append(' DIV ');
+            return;
+        }
+        $out->append($op->symbol());
+    }
+
+    public const function syntax() : Syntax
+    {
+        return Syntax($backslashes: true, $hashComments: true, $spacedDashes: true, $likeEscape: true);
+    }
+
+    private const function aliased() : bool
+    {
+        return $this->rowAlias && !$this->mariadb;
+    }
+}

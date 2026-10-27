@@ -1,0 +1,8 @@
+function show(const string& $s) : void
+{
+    std::io::file $f = guard std::io::append('/private/tmp/claude-501/-Users-mariodoring-Developer-echolibs-hydrahon/dbfef8ec-453c-491a-bcb1-519ca2a98358/scratchpad/show.txt');
+    string $l = $s;
+    $l->push(10);
+    guard $f->write($l);
+    $f->close();
+}

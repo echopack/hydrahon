@@ -1,0 +1,70 @@
+/**
+ * hydrahon against a live MySQL: `MYSQL_URL=mysql://user:pass@host/db echoc run`.
+ * Run `hydragen` here first; it writes the table handles into `.hydrahon/`.
+ */
+
+use hydrahon::{Select, Insert, Update, Delete};
+use hydrahon::fn;
+use std::time;
+
+string $url = string::from(std::env::var('MYSQL_URL', 'mysql://root@127.0.0.1/test'));
+mysql::Options $options = guard mysql::Options::parse($url);
+$options->fetchServerKey = true;
+$options->timeout = time::duration::secs(10);
+mysql::Connection $db = guard mysql::Connection::open($options) else ($e) {
+    die("connect: {$e}");
+}
+
+// hydrahon does not do DDL; the schema is plain SQL
+guard $db->exec('DROP TABLE IF EXISTS orders');
+guard $db->exec('DROP TABLE IF EXISTS customers');
+guard $db->exec('CREATE TABLE customers (id BIGINT AUTO_INCREMENT PRIMARY KEY, email VARCHAR(100) NOT NULL UNIQUE, name VARCHAR(100) NOT NULL, visits INT NOT NULL DEFAULT 0, last_seen DATETIME NULL)');
+guard $db->exec('CREATE TABLE orders (id BIGINT AUTO_INCREMENT PRIMARY KEY, customer_id BIGINT NOT NULL, total DECIMAL(10,2) NOT NULL, paid BOOL NOT NULL)');
+
+$c = shop::CustomerTable();
+$o = shop::OrderTable(alias: 'o');
+
+// two customers, then the first one again: the upsert bumps the visits
+$add = Insert(into: $c)
+    ->row([$c->email => 'mario@x.ch', $c->name => 'Mario', $c->visits => 1, $c->lastSeen => null])
+    ->row([$c->email => 'boris@x.ch', $c->name => 'Boris', $c->visits => 1, $c->lastSeen => hydrahon::DateTime(unix: 1700000000)])
+    ->conflict([$c->email])
+    ->update([$c->visits => $c->visits + 1]);
+mysql::Outcome $first = guard shop::exec($db, $add);
+echo "inserted {$first->affectedRows} customer rows";
+mysql::Outcome $again = guard shop::exec($db, $add);
+echo "upsert touched {$again->affectedRows} rows";
+
+$orders = Insert(into: $o)
+    ->row([$o->customerId => 1, $o->total => hydrahon::Decimal('19.90'), $o->paid => true])
+    ->row([$o->customerId => 1, $o->total => hydrahon::Decimal('5.00'), $o->paid => false])
+    ->row([$o->customerId => 2, $o->total => hydrahon::Decimal('42.00'), $o->paid => true]);
+guard shop::exec($db, $orders);
+
+// paid revenue per customer
+$report = Select(from: $c)
+    ->fields([$c->name, $c->visits, fn::count($o->id)->named('orders'), fn::sum($o->total)->named('revenue')])
+    ->join(left: $o, on: $o->customerId == $c->id && $o->paid)
+    ->group([$c->id, $c->name, $c->visits])
+    ->order([$c->name]);
+mysql::ResultSet $rs = guard shop::query($db, $report);
+foreach ($rs as $row) {
+    echo "{$row['name']}: {$row['visits']} visits, {$row['orders']} paid orders, {$row['revenue']}";
+}
+
+mysql::ResultSet $total = guard shop::query($db, $report->count());
+echo "{$total->rows[0]['count']} customers in the report";
+
+$touch = Update($c)->set([$c->lastSeen => hydrahon::DateTime(unix: 1710000000)])->where($c->email == 'mario@x.ch');
+guard shop::exec($db, $touch);
+mysql::ResultSet $seen = guard shop::query($db, Select(from: $c)->fields([$c->email])->where($c->lastSeen->isNotNull()));
+echo "{$seen->count()} customers seen";
+
+// an empty list deletes nothing
+array<int64> $none = [];
+mysql::Outcome $gone = guard shop::exec($db, Delete(from: $c)->where($c->id in $none));
+echo "empty delete removed {$gone->affectedRows} rows";
+
+guard $db->exec('DROP TABLE orders');
+guard $db->exec('DROP TABLE customers');
+echo 'done';

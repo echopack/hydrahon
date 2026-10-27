@@ -1,0 +1,81 @@
+namespace hydrahon;
+
+/**
+ * Where bound parameters go. A driver adapter implements one method per value kind; `Sql::bind`
+ * calls them in placeholder order.
+ */
+public interface Binder
+{
+    function none() : void;
+    function bool(bool $v) : void;
+    function int(int64 $v) : void;
+    function uint(uint64 $v) : void;
+    function float(float64 $v) : void;
+    function decimal(const Decimal& $v) : void;
+    function text(const string& $v) : void;
+    function bytes(const Bytes& $v) : void;
+    function date(const Date& $v) : void;
+    function datetime(const DateTime& $v) : void;
+    function time(const Time& $v) : void;
+}
+
+/**
+ * The parameters of a rendered statement, in placeholder order. Copying an `Sql` copies its
+ * parameters.
+ */
+public struct Params : contract::const_iterable<const Value>
+{
+    internal array<Value> $items = [];
+
+    /**
+     * A list of values as the parameters of a hand-built `Sql`.
+     */
+    #[implicit]
+    public static function from(array<Value> $items) : Params
+    {
+        Params $p = Params();
+        $p->items = mv $items;
+        return $p;
+    }
+
+    public const function count() : usize
+    {
+        return $this->items->count();
+    }
+
+    public const function iterate() : slice_iterator<const Value>
+    {
+        return $this->items->iterate();
+    }
+}
+
+/**
+ * A rendered statement: SQL text in one dialect and its parameters in placeholder order.
+ */
+public struct Sql
+{
+    public const string $text;
+    public const Params $params;
+
+    /**
+     * Hand every parameter to `$binder`, first placeholder first.
+     */
+    public const function bind<B : Binder>(B& $binder) : void
+    {
+        foreach ($this->params as const &$v) {
+            match ($v) {
+                Value::none => { $binder->none(); },
+                Value::bool($x) => { $binder->bool($x); },
+                Value::int($x) => { $binder->int($x); },
+                Value::uint($x) => { $binder->uint($x); },
+                Value::float($x) => { $binder->float($x); },
+                Value::decimal($x) => { $binder->decimal($x); },
+                Value::text($x) => { $binder->text($x); },
+                Value::bytes($x) => { $binder->bytes($x); },
+                Value::date($x) => { $binder->date($x); },
+                Value::datetime($x) => { $binder->datetime($x); },
+                Value::time($x) => { $binder->time($x); },
+            };
+        }
+    }
+}

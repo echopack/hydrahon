@@ -1,0 +1,89 @@
+namespace hydrahon;
+
+/**
+ * A DELETE from one table. Without a condition it deletes every row, as SQL does; an empty `in`
+ * list matches nothing, so it never widens a delete by accident.
+ */
+public struct Delete
+{
+    internal Table $table;
+    internal array<Node> $wheres = array<Node>();
+    internal array<Order> $orders = array<Order>();
+    internal uint64? $take = null;
+    internal array<Field> $returns = array<Field>();
+    internal array<Cte> $ctes = array<Cte>();
+
+    public constructor(from: Source $source)
+    {
+        $this->table = $source->table();
+    }
+
+    public constructor(from: Table $table)
+    {
+        $this->table = $table;
+    }
+
+    /**
+     * Add a condition. Several calls must all hold; write `||` for either.
+     */
+    public function where(Term<bool> $condition) : Delete&
+    {
+        condition($this->wheres, own($condition->node));
+        return $this;
+    }
+
+    public function where(Term<bool?> $condition) : Delete&
+    {
+        condition($this->wheres, own($condition->node));
+        return $this;
+    }
+
+    /**
+     * The order rows are deleted in. MySQL only.
+     */
+    public function order(array<Order> $by) : Delete&
+    {
+        adopt($this->orders, mv $by);
+        return $this;
+    }
+
+    /**
+     * Delete at most `$rows` rows. MySQL only.
+     */
+    public function limit(uint64 $rows) : Delete&
+    {
+        $this->take = $rows;
+        return $this;
+    }
+
+    public function returning(array<Field> $fields) : Delete&
+    {
+        adopt($this->returns, mv $fields);
+        return $this;
+    }
+
+    public function with(name: string $name, Select $query) : Delete&
+    {
+        $this->ctes[] = Cte($name, false, rc<Select>(mv $query));
+        return $this;
+    }
+
+    public function with(recursive: string $name, Select $query) : Delete&
+    {
+        $this->ctes[] = Cte($name, true, rc<Select>(mv $query));
+        return $this;
+    }
+
+    public const function sql<D : Dialect>(const D& $dialect) : result<Sql, Error>
+    {
+        $r = Renderer<D>($dialect);
+        $r->delete($this);
+        return $r->finish();
+    }
+
+    public const function sql<D : Dialect>() : result<Sql, Error>
+    {
+        D $dialect = D();
+        return $this->sql($dialect);
+    }
+}

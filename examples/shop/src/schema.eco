@@ -1,0 +1,27 @@
+namespace shop;
+
+/**
+ * A customer. hydragen turns it into `shop::CustomerTable`.
+ */
+#[hydrahon::table: 'customers']
+#[hydrahon::columns: 'snake']
+public struct Customer
+{
+    public int64 $id;
+    public string $email;
+    public string $name;
+    public int32 $visits;
+    public hydrahon::DateTime? $lastSeen;
+}
+
+#[hydrahon::table: 'orders']
+#[hydrahon::columns: 'snake']
+public struct Order
+{
+    public int64 $id;
+    public int64 $customerId;
+    public hydrahon::Decimal $total;
+    public bool $paid;
+    #[hydrahon::skip]
+    public array<string> $notes;
+}

@@ -1,0 +1,69 @@
+namespace hydrahon;
+
+/**
+ * PostgreSQL 9.5 and later: `$n` placeholders, `ON CONFLICT` upserts and `RETURNING`. Raw SQL is
+ * read with `standard_conforming_strings` on, the default since 9.1.
+ */
+public struct Postgres : Dialect
+{
+    public const function quote(const string& $ident, str::text& $out) : void
+    {
+        quoteWith($ident, 34, $out);
+    }
+
+    public const function placeholder(usize $n, str::text& $out) : void
+    {
+        $out->push(36);
+        digits($n as uint64, $out);
+    }
+
+    public const function unlimited(str::text& $out) : void
+    {
+    }
+
+    public const function supports(Feature $f) : bool
+    {
+        return match ($f) {
+            Feature::updateLimit => false,
+            Feature::updateOrder => false,
+            Feature::deleteLimit => false,
+            Feature::deleteOrder => false,
+            else => true,
+        };
+    }
+
+    public const function upsert() : UpsertStyle
+    {
+        return .onConflict;
+    }
+
+    public const function excluded(const string& $column, str::text& $out) : void
+    {
+        $out->append('EXCLUDED.');
+        $this->quote($column, $out);
+    }
+
+    public const function incoming(str::text& $out) : void
+    {
+    }
+
+    public const function truncate(str::text& $out) : void
+    {
+        $out->append('TRUNCATE TABLE ');
+    }
+
+    public const function call(Function $fn, str::text& $out) : void
+    {
+        standardName($fn, $out);
+    }
+
+    public const function symbol(Binary $op, str::text& $out) : void
+    {
+        $out->append($op->symbol());
+    }
+
+    public const function syntax() : Syntax
+    {
+        return Syntax($dollarQuotes: true, $likeEscape: true);
+    }
+}

@@ -1,0 +1,105 @@
+namespace hydrahon;
+
+/**
+ * An UPDATE of one table.
+ *
+ * ```echo
+ * $q = hydrahon::Update($u)
+ *     ->set([$u->views => $u->views + 1])
+ *     ->where($u->id == 7);
+ * ```
+ */
+public struct Update
+{
+    internal Table $table;
+    internal Values $sets = Values();
+    internal array<Node> $wheres = array<Node>();
+    internal array<Order> $orders = array<Order>();
+    internal uint64? $take = null;
+    internal array<Field> $returns = array<Field>();
+    internal array<Cte> $ctes = array<Cte>();
+
+    public constructor(Source $source)
+    {
+        $this->table = $source->table();
+    }
+
+    public constructor(Table $table)
+    {
+        $this->table = $table;
+    }
+
+    /**
+     * Set columns. A value may read the row being updated through the columns:
+     * `[$u->views => $u->views + 1]`. Several calls add up.
+     */
+    public function set(Values $values) : Update&
+    {
+        $this->sets->add(mv $values);
+        return $this;
+    }
+
+    /**
+     * Add a condition. Several calls must all hold; write `||` for either.
+     */
+    public function where(Term<bool> $condition) : Update&
+    {
+        condition($this->wheres, own($condition->node));
+        return $this;
+    }
+
+    public function where(Term<bool?> $condition) : Update&
+    {
+        condition($this->wheres, own($condition->node));
+        return $this;
+    }
+
+    /**
+     * The order rows are updated in. MySQL only.
+     */
+    public function order(array<Order> $by) : Update&
+    {
+        adopt($this->orders, mv $by);
+        return $this;
+    }
+
+    /**
+     * Update at most `$rows` rows. MySQL only.
+     */
+    public function limit(uint64 $rows) : Update&
+    {
+        $this->take = $rows;
+        return $this;
+    }
+
+    public function returning(array<Field> $fields) : Update&
+    {
+        adopt($this->returns, mv $fields);
+        return $this;
+    }
+
+    public function with(name: string $name, Select $query) : Update&
+    {
+        $this->ctes[] = Cte($name, false, rc<Select>(mv $query));
+        return $this;
+    }
+
+    public function with(recursive: string $name, Select $query) : Update&
+    {
+        $this->ctes[] = Cte($name, true, rc<Select>(mv $query));
+        return $this;
+    }
+
+    public const function sql<D : Dialect>(const D& $dialect) : result<Sql, Error>
+    {
+        $r = Renderer<D>($dialect);
+        $r->update($this);
+        return $r->finish();
+    }
+
+    public const function sql<D : Dialect>() : result<Sql, Error>
+    {
+        D $dialect = D();
+        return $this->sql($dialect);
+    }
+}

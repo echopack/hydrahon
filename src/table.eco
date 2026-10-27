@@ -1,0 +1,153 @@
+namespace hydrahon;
+
+/**
+ * A table as a statement sees it: its name, an optional schema, and the alias or common table
+ * expression name it goes by. Generated handles build one; user code rarely needs to. All of it
+ * sits in one shared owner, so a statement copies a table for the cost of a retain.
+ */
+public struct Table : Source
+{
+    internal Owner $owner;
+
+    public constructor(name: string $name, string? $schema = null)
+    {
+        string? $s = $schema;
+        $this->owner = Owner($name, $s, $name, false, false);
+    }
+
+    /**
+     * The table under another name, for self joins and readability.
+     */
+    public constructor(name: string $name, alias: string $alias, string? $schema = null)
+    {
+        string? $s = $schema;
+        $this->owner = Owner($name, $s, $alias, false, true);
+    }
+
+    /**
+     * A reference to the common table expression `$name`, shaped like this table.
+     */
+    public constructor(cte: string $name)
+    {
+        $this->owner = Owner($name, null, $name, true, false);
+    }
+
+    /**
+     * The table's own name, or the common table expression's.
+     */
+    public const function name() : const string&
+    {
+        return $this->owner->table;
+    }
+
+    public const function schema() : string?
+    {
+        return $this->owner->schema;
+    }
+
+    /**
+     * The name this table goes by in a query, or null when it has none of its own.
+     */
+    public const function alias() : string?
+    {
+        if (!$this->owner->aliased) {
+            return null;
+        }
+        string? $a = $this->owner->qualifier;
+        return $a;
+    }
+
+    /**
+     * Whether this names a common table expression rather than a stored table.
+     */
+    public const function cte() : bool
+    {
+        return $this->owner->cte;
+    }
+
+    /**
+     * This table, so a statement can take a hand-built `Table` as a source.
+     */
+    public const function table() : Table
+    {
+        return $this;
+    }
+
+    /**
+     * The name that qualifies this table's columns in a query.
+     */
+    public const function qualifier() : string
+    {
+        return $this->owner->qualifier;
+    }
+
+    /**
+     * The typed column `$name` of this table.
+     */
+    public function column<T>(const string& $name) : Term<T>
+    {
+        uint32 $slot = $this->owner->columns;
+        $this->owner->columns = $slot + 1;
+        return Term<T>(.column(Ident($this->owner, $name, $slot)));
+    }
+
+    /**
+     * Every column of this table, `t.*`, as a select field.
+     */
+    public const function star() : Field
+    {
+        string? $q = $this->qualifier();
+        return Field(.star($q));
+    }
+}
+
+/**
+ * The table side of a column's identity: schema, table name, whether it is a CTE, and the name
+ * that qualifies its columns. One per table handle, shared by every column made from it, so a
+ * column costs no allocation of its own and two columns of one handle are told apart from others
+ * by identity.
+ */
+internal class Owner
+{
+    internal const string $table;
+    internal const string? $schema;
+    internal const string $qualifier;
+    internal const bool $cte;
+    // whether `$qualifier` is an alias rather than the table name
+    internal const bool $aliased;
+    // how many columns were made from this table, which numbers each one
+    internal uint32 $columns = 0;
+
+    /**
+     * Whether this and `$other` are the same table or the same CTE, under any qualifier.
+     */
+    internal const function sameTable(const Owner& $other) : bool
+    {
+        if ($this == $other) {
+            return true;
+        }
+        if ($this->table != $other->table || $this->cte != $other->cte) {
+            return false;
+        }
+        $a = $this->schema;
+        $b = $other->schema;
+        if ($a == null) {
+            return $b == null;
+        }
+        if ($b == null) {
+            return false;
+        }
+        string $left = guard $a;
+        string $right = guard $b;
+        return $left == $right;
+    }
+}
+
+/**
+ * Anything a statement can read from or write to. `Table` conforms, and generated handles wrap
+ * one, so a statement takes either without knowing the columns.
+ */
+public interface Source
+{
+    const function table() : Table;
+}

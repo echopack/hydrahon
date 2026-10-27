@@ -1,0 +1,426 @@
+namespace hydrahon;
+
+internal enum JoinKind
+{
+    case inner;
+    case left;
+    case right;
+    case full;
+    case cross;
+}
+
+internal struct Join
+{
+    internal Table $table;
+    internal JoinKind $kind;
+    // not optional, so the renderer borrows it; a cross join holds `Node::hole`
+    internal Node $on;
+}
+
+/**
+ * Append `$more` to `$into`, taking it whole when `$into` is still empty.
+ */
+internal function adopt<T>(array<T>& $into, array<T> $more) : void
+{
+    if ($into->count() == 0) {
+        $into = mv $more;
+        return;
+    }
+    $into->extend($more);
+}
+
+/**
+ * Add a WHERE or HAVING condition, with room for a few more on the first.
+ */
+internal function condition(array<Node>& $into, Node $n) : void
+{
+    if ($into->count() == 0) {
+        $into->reserve(4);
+    }
+    $into[] = mv $n;
+}
+
+/**
+ * A common table expression a statement starts with: `WITH name AS (query)`.
+ */
+internal struct Cte
+{
+    internal string $name;
+    internal bool $recursive;
+    internal rc<Select> $query;
+}
+
+internal enum Compound
+{
+    case union;
+    case unionAll;
+}
+
+internal struct Branch
+{
+    internal Compound $kind;
+    internal rc<Select> $query;
+}
+
+/**
+ * A SELECT. Chain methods change this statement and hand it back; copy it to branch off a
+ * variant, the copy is independent. ORDER BY, LIMIT and OFFSET apply to the whole statement,
+ * including any union branches.
+ *
+ * ```echo
+ * $q = hydrahon::Select(from: $u)
+ *     ->fields([$u->id, $u->name])
+ *     ->where($u->active && $u->age >= 18)
+ *     ->order([$u->name])
+ *     ->limit(20);
+ * $sql = guard $q->sql<hydrahon::Postgres>();
+ * ```
+ */
+public struct Select
+{
+    // the alias of a `count()` derived table; a name that cannot be a user table
+    internal const DERIVED = '_h';
+
+    internal Table? $from;
+    internal rc<Select>? $inner;
+    internal array<Field> $fields = array<Field>();
+    internal bool $unique = false;
+    internal array<Join> $joins = array<Join>();
+    internal array<Node> $wheres = array<Node>();
+    internal array<Node> $groups = array<Node>();
+    internal array<Node> $havings = array<Node>();
+    internal array<Order> $orders = array<Order>();
+    internal uint64? $take = null;
+    internal uint64? $skip = null;
+    internal array<Branch> $branches = array<Branch>();
+    internal array<Cte> $ctes = array<Cte>();
+
+    public constructor(from: Source $source)
+    {
+        $this->from = $source->table();
+        $this->inner = null;
+    }
+
+    public constructor(from: Table $table)
+    {
+        $this->from = $table;
+        $this->inner = null;
+    }
+
+    /**
+     * A select without a FROM clause, such as `SELECT EXISTS (...)`.
+     */
+    public constructor(fields: array<Field> $fields)
+    {
+        $this->from = null;
+        $this->inner = null;
+        $this->fields = $fields;
+    }
+
+    /**
+     * Count the rows of `$query`, which becomes a derived table.
+     */
+    internal constructor(around: Select $query)
+    {
+        $this->from = null;
+        $this->inner = rc<Select>(mv $query);
+    }
+
+    /**
+     * Add to the select list. Without fields a select reads `*`.
+     */
+    public function fields(array<Field> $fields) : Select&
+    {
+        adopt($this->fields, mv $fields);
+        return $this;
+    }
+
+    public function distinct() : Select&
+    {
+        $this->unique = true;
+        return $this;
+    }
+
+    public function join<S : Source>(inner: S $source, on: Term<bool> $on) : Select&
+    {
+        $this->attach($source->table(), .inner, own($on->node));
+        return $this;
+    }
+
+    public function join<S : Source>(left: S $source, on: Term<bool> $on) : Select&
+    {
+        $this->attach($source->table(), .left, own($on->node));
+        return $this;
+    }
+
+    public function join<S : Source>(right: S $source, on: Term<bool> $on) : Select&
+    {
+        $this->attach($source->table(), .right, own($on->node));
+        return $this;
+    }
+
+    public function join<S : Source>(full: S $source, on: Term<bool> $on) : Select&
+    {
+        $this->attach($source->table(), .full, own($on->node));
+        return $this;
+    }
+
+    public function join<S : Source>(cross: S $source) : Select&
+    {
+        $this->attach($source->table(), .cross, .hole);
+        return $this;
+    }
+
+    /**
+     * Add a condition. Several calls must all hold; write `||` for either.
+     */
+    public function where(Term<bool> $condition) : Select&
+    {
+        condition($this->wheres, own($condition->node));
+        return $this;
+    }
+
+    public function where(Term<bool?> $condition) : Select&
+    {
+        condition($this->wheres, own($condition->node));
+        return $this;
+    }
+
+    public function group(array<Expr> $by) : Select&
+    {
+        if ($this->groups->count() == 0) {
+            $this->groups->reserve(4);
+        }
+        foreach ($by as &$e) {
+            $this->groups[] = own($e->node);
+        }
+        return $this;
+    }
+
+    /**
+     * Add a condition on the groups. Several calls must all hold.
+     */
+    public function having(Term<bool> $condition) : Select&
+    {
+        condition($this->havings, own($condition->node));
+        return $this;
+    }
+
+    public function order(array<Order> $by) : Select&
+    {
+        adopt($this->orders, mv $by);
+        return $this;
+    }
+
+    /**
+     * At most `$rows` rows. `limit(0)` asks for none.
+     */
+    public function limit(uint64 $rows) : Select&
+    {
+        $this->take = $rows;
+        return $this;
+    }
+
+    public function offset(uint64 $rows) : Select&
+    {
+        $this->skip = $rows;
+        return $this;
+    }
+
+    /**
+     * The page at `$index`, counting from 0, of `$size` rows each.
+     */
+    public function page(uint64 $index, uint64 $size) : Select&
+    {
+        $this->take = $size;
+        uint64 $skip = 18446744073709551615;
+        // a page past the end of uint64 starts past every row
+        if ($size == 0 || $index <= $skip / $size) {
+            $skip = $index * $size;
+        }
+        $this->skip = $skip;
+        return $this;
+    }
+
+    /**
+     * Append `$query` as a UNION branch, which drops duplicate rows.
+     */
+    public function union(Select $query) : Select&
+    {
+        $this->branches[] = Branch(.union, rc<Select>(mv $query));
+        return $this;
+    }
+
+    /**
+     * Append `$query` as a UNION ALL branch, which keeps every row.
+     */
+    public function union(all: Select $query) : Select&
+    {
+        $this->branches[] = Branch(.unionAll, rc<Select>(mv $query));
+        return $this;
+    }
+
+    /**
+     * Start the statement with `WITH $name AS ($query)`. Read it through a handle built with
+     * `cte: $name`.
+     */
+    public function with(name: string $name, Select $query) : Select&
+    {
+        $this->ctes[] = Cte($name, false, rc<Select>(mv $query));
+        return $this;
+    }
+
+    public function with(recursive: string $name, Select $query) : Select&
+    {
+        $this->ctes[] = Cte($name, true, rc<Select>(mv $query));
+        return $this;
+    }
+
+    /**
+     * A new statement counting the rows this one yields. This statement stays as it is. A plain
+     * filter becomes `COUNT(*)` over the same tables; grouping, HAVING, aggregates, DISTINCT,
+     * LIMIT, OFFSET or unions count over this statement as a derived table. MySQL cannot count
+     * DISTINCT or UNION rows of `*` across a join that way; list the fields instead.
+     */
+    public const function count() : Select
+    {
+        Select $copy = $this;
+        bool $aggregates = false;
+        foreach ($copy->fields as const &$f) {
+            if ($f->node->aggregates()) {
+                $aggregates = true;
+            }
+        }
+        bool $derived = $aggregates || $copy->unique || $copy->groups->count() > 0 || $copy->havings->count() > 0 || $copy->take != null || $copy->skip != null || $copy->branches->count() > 0;
+        if ($derived) {
+            // the common table expressions stay outside, on the counting statement
+            array<Cte> $ctes = $copy->ctes;
+            Select $body = mv $copy;
+            $body->ctes = array<Cte>();
+            if ($body->take == null && $body->skip == null) {
+                // the order cannot change the count, it only costs a sort
+                $body->orders = array<Order>();
+            }
+            $body->fields = $body->outputs($aggregates);
+            $out = Select(around: mv $body);
+            $out->ctes = mv $ctes;
+            $out->fields = [Field(.countAll, 'count')];
+            return $out;
+        }
+        $copy->fields = [Field(.countAll, 'count')];
+        $copy->orders = array<Order>();
+        return $copy;
+    }
+
+    /**
+     * Whether this query yields any row, as a condition or a field.
+     */
+    public const function exists() : Term<bool>
+    {
+        return Term<bool>(.exists(rc<Select>($this)));
+    }
+
+    /**
+     * This query as a single value, for a query that selects one column and at most one row.
+     */
+    public const function scalar<T>() : Term<T>
+    {
+        return Term<T>(.scalar(rc<Select>($this)));
+    }
+
+    public const function sql<D : Dialect>(const D& $dialect) : result<Sql, Error>
+    {
+        $r = Renderer<D>($dialect);
+        $r->select($this);
+        return $r->finish();
+    }
+
+    public const function sql<D : Dialect>() : result<Sql, Error>
+    {
+        D $dialect = D();
+        return $this->sql($dialect);
+    }
+
+    /**
+     * Whether the select list reads `*`, as a whole or for one table.
+     */
+    internal const function stars() : bool
+    {
+        if ($this->fields->count() == 0) {
+            return true;
+        }
+        foreach ($this->fields as const &$f) {
+            match ($f->node) {
+                Node::star($q) => {
+                    return true;
+                },
+                else => {},
+            };
+        }
+        return false;
+    }
+
+    /**
+     * The select list of this statement as a derived table that only gets counted, which may
+     * not repeat a column name. Where the row count does not depend on the columns, only the
+     * fields a clause may name by alias stay, or `1`. DISTINCT, a union, or aggregates without
+     * GROUP BY need every field; a column whose name another field already goes by gets an
+     * alias of its own.
+     */
+    private const function outputs(bool $aggregates) : array<Field>
+    {
+        bool $keep = $this->unique || $this->branches->count() > 0 || ($aggregates && $this->groups->count() == 0);
+        array<Field> $out = array<Field>();
+        map<string, bool> $taken = map<string, bool>();
+        foreach ($this->fields as const &$f) {
+            if ($f->alias != null) {
+                string $a = guard $f->alias;
+                $taken[$a] = true;
+                $out[] = $f;
+            }
+        }
+        if (!$keep) {
+            if ($out->count() == 0) {
+                $out[] = Field(.raw('1', array<Value>()));
+            }
+            return $out;
+        }
+        $out = array<Field>();
+        usize $n = 0;
+        foreach ($this->fields as const &$f) {
+            Ident? $id = $f->node->ident();
+            if ($f->alias != null || $id == null) {
+                $out[] = $f;
+                continue;
+            }
+            Ident $col = guard $id;
+            const string& $colName = $col->name();
+            if (!$taken->has($colName)) {
+                $taken[$colName] = true;
+                $out[] = $f;
+                continue;
+            }
+            string $alias = $colName;
+            while ($taken->has($alias)) {
+                $n = $n + 1;
+                $alias = "{$colName}_{$n}";
+            }
+            $taken[$alias] = true;
+            Field $renamed = $f;
+            string? $named = $alias;
+            $renamed->alias = $named;
+            $out[] = mv $renamed;
+        }
+        return $out;
+    }
+
+    // the join overloads return `$this` themselves: a chain on a temporary only moves when every
+    // link does
+    private function attach(Table $table, JoinKind $kind, Node $on) : void
+    {
+        if ($this->joins->count() == 0) {
+            $this->joins->reserve(2);
+        }
+        $this->joins[] = Join(mv $table, $kind, mv $on);
+    }
+}

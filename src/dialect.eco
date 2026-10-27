@@ -1,0 +1,313 @@
+namespace hydrahon;
+
+/**
+ * How an insert reacts to a unique key conflict, per dialect.
+ */
+public enum UpsertStyle
+{
+    // INSERT IGNORE / ON DUPLICATE KEY UPDATE, no conflict target
+    case duplicateKey;
+    // ON CONFLICT (target) DO NOTHING / DO UPDATE SET
+    case onConflict;
+}
+
+/**
+ * How a dialect reads SQL text, as far as hydrahon needs to know: where raw SQL has quoted spans
+ * and comments a `?` inside of is no placeholder, and whether LIKE needs an ESCAPE clause. Every
+ * flag off is standard SQL.
+ */
+public struct Syntax
+{
+    /**
+     * A backslash escapes the next character inside a quoted string.
+     */
+    public bool $backslashes = false;
+
+    /**
+     * `#` starts a comment to the end of the line.
+     */
+    public bool $hashComments = false;
+
+    /**
+     * `--` starts a comment only when whitespace follows it.
+     */
+    public bool $spacedDashes = false;
+
+    /**
+     * `$tag$ ... $tag$` quotes a string, and `E'...'` takes backslash escapes.
+     */
+    public bool $dollarQuotes = false;
+
+    /**
+     * A LIKE pattern without an ESCAPE clause already treats a backslash as its escape
+     * character. Without it, hydrahon writes `ESCAPE '\'` so every dialect matches alike.
+     */
+    public bool $likeEscape = false;
+
+    /**
+     * The end of the quoted span or comment that starts at byte `$at` of `$sql`, or `$at` when
+     * code starts there. An unterminated one runs to the end.
+     */
+    internal const function span(const string& $sql, usize $at) : usize
+    {
+        usize $size = $sql->size();
+        uint8 $b = $sql->byte($at);
+        uint8 $next = 0;
+        if ($at + 1 < $size) {
+            $next = $sql->byte($at + 1);
+        }
+        if ($this->dollarQuotes && ($b == 69 || $b == 101) && $next == 39 && !Syntax::word($sql, $at)) {
+            return Syntax::quoted($sql, $at + 1, true);
+        }
+        if ($b == 39 || $b == 34) {
+            return Syntax::quoted($sql, $at, $this->backslashes);
+        }
+        if ($b == 96) {
+            return Syntax::quoted($sql, $at, false);
+        }
+        bool $dashes = $b == 45 && $next == 45;
+        if ($dashes && $this->spacedDashes) {
+            $dashes = $at + 2 >= $size || $sql->byte($at + 2) <= 32;
+        }
+        if ($dashes || ($b == 35 && $this->hashComments)) {
+            usize $i = $at;
+            while ($i < $size && $sql->byte($i) != 10) {
+                $i = $i + 1;
+            }
+            return $i;
+        }
+        if ($b == 47 && $next == 42) {
+            usize $i = $at + 2;
+            while ($i + 1 < $size) {
+                if ($sql->byte($i) == 42 && $sql->byte($i + 1) == 47) {
+                    return $i + 2;
+                }
+                $i = $i + 1;
+            }
+            return $size;
+        }
+        if ($b == 36 && $this->dollarQuotes && !Syntax::word($sql, $at)) {
+            return Syntax::dollar($sql, $at);
+        }
+        return $at;
+    }
+
+    /**
+     * The end of the string or quoted identifier opened by the quote at `$at`. A doubled quote
+     * stands for itself.
+     */
+    private static function quoted(const string& $sql, usize $at, bool $backslashes) : usize
+    {
+        usize $size = $sql->size();
+        uint8 $q = $sql->byte($at);
+        usize $i = $at + 1;
+        while ($i < $size) {
+            uint8 $b = $sql->byte($i);
+            if ($backslashes && $b == 92) {
+                $i = $i + 2;
+                continue;
+            }
+            if ($b == $q) {
+                if ($i + 1 < $size && $sql->byte($i + 1) == $q) {
+                    $i = $i + 2;
+                    continue;
+                }
+                return $i + 1;
+            }
+            $i = $i + 1;
+        }
+        return $size;
+    }
+
+    /**
+     * The end of the `$tag$ ... $tag$` string at `$at`, or `$at` when no tag opens there, as in
+     * a `$1` parameter.
+     */
+    private static function dollar(const string& $sql, usize $at) : usize
+    {
+        usize $size = $sql->size();
+        usize $i = $at + 1;
+        while ($i < $size) {
+            uint8 $b = $sql->byte($i);
+            bool $digit = $b >= 48 && $b <= 57;
+            if (!Syntax::letter($b) && !($digit && $i > $at + 1)) {
+                break;
+            }
+            $i = $i + 1;
+        }
+        if ($i >= $size || $sql->byte($i) != 36) {
+            return $at;
+        }
+        usize $tag = $i + 1 - $at;
+        usize $j = $i + 1;
+        while ($j + $tag <= $size) {
+            bool $closes = true;
+            usize $k = 0;
+            while ($k < $tag) {
+                if ($sql->byte($j + $k) != $sql->byte($at + $k)) {
+                    $closes = false;
+                    break;
+                }
+                $k = $k + 1;
+            }
+            if ($closes) {
+                return $j + $tag;
+            }
+            $j = $j + 1;
+        }
+        return $size;
+    }
+
+    /**
+     * Whether the byte before `$at` belongs to a word, which makes `$at` part of it too.
+     */
+    private static function word(const string& $sql, usize $at) : bool
+    {
+        if ($at == 0) {
+            return false;
+        }
+        uint8 $b = $sql->byte($at - 1);
+        return Syntax::letter($b) || ($b >= 48 && $b <= 57) || $b == 36;
+    }
+
+    private static function letter(uint8 $b) : bool
+    {
+        return ($b >= 65 && $b <= 90) || ($b >= 97 && $b <= 122) || $b == 95 || $b >= 128;
+    }
+}
+
+/**
+ * The part of SQL that differs between databases. The renderer is shared; a dialect only answers
+ * these questions. Conform a struct to add a dialect of your own.
+ */
+public interface Dialect
+{
+    /**
+     * Append `$ident` as a quoted identifier, with the quote character doubled inside.
+     */
+    const function quote(const string& $ident, str::text& $out) : void;
+
+    /**
+     * Append the placeholder for the `$n`th parameter, counting from 1.
+     */
+    const function placeholder(usize $n, str::text& $out) : void;
+
+    /**
+     * Append what has to stand before OFFSET when a statement has no LIMIT.
+     */
+    const function unlimited(str::text& $out) : void;
+
+    /**
+     * Whether the dialect can express `$f` at all.
+     */
+    const function supports(Feature $f) : bool;
+
+    const function upsert() : UpsertStyle;
+
+    /**
+     * Append a reference to the value an upsert tried to insert into column `$column`.
+     */
+    const function excluded(const string& $column, str::text& $out) : void;
+
+    /**
+     * Append what follows the VALUES list when an upsert refers to the incoming row.
+     */
+    const function incoming(str::text& $out) : void;
+
+    /**
+     * Append the statement head that empties a table, up to the table name.
+     */
+    const function truncate(str::text& $out) : void;
+
+    /**
+     * Append the SQL name of a catalog function.
+     */
+    const function call(Function $fn, str::text& $out) : void;
+
+    /**
+     * Append `$op` with the spaces around it. `Binary::symbol` is the standard spelling.
+     */
+    const function symbol(Binary $op, str::text& $out) : void;
+
+    const function syntax() : Syntax;
+}
+
+/**
+ * Append `$ident` between `$q` quotes, doubling any `$q` inside.
+ */
+internal function quoteWith(const string& $ident, uint8 $q, str::text& $out) : void
+{
+    ptr<const uint8> $bytes = $ident->data();
+    usize $n = $ident->size();
+    usize $at = 0;
+    while ($at < $n) {
+        uint8 $b = $bytes:$[$at];
+        if ($b == $q || $b == 0) {
+            break;
+        }
+        $at = $at + 1;
+    }
+    $out->push($q);
+    if ($at == $n) {
+        // nothing to double or drop, the usual case: one copy instead of a push per byte
+        $out->append($bytes, $n);
+        $out->push($q);
+        return;
+    }
+    usize $i = 0;
+    while ($i < $n) {
+        uint8 $b = $bytes:$[$i];
+        if ($b == $q) {
+            $out->push($q);
+        }
+        if ($b != 0) {
+            $out->push($b);
+        }
+        $i = $i + 1;
+    }
+    $out->push($q);
+}
+
+/**
+ * Append `$n` in decimal, without the temporary string `str::from` would build. Placeholder
+ * numbers and row counts go through here.
+ */
+internal function digits(uint64 $n, str::text& $out) : void
+{
+    if ($n < 10) {
+        $out->push(48 + ($n as uint8));
+        return;
+    }
+    // back to front into a stack buffer, then one append
+    uint8[20] $buf;
+    usize $at = 20;
+    while ($n > 0) {
+        $at = $at - 1;
+        $buf[$at] = 48 + (($n % 10) as uint8);
+        $n = $n / 10;
+    }
+    ptr<const uint8> $p = &$buf[0];
+    $out->append($p:$ + $at, 20 - $at);
+}
+
+/**
+ * The function names every dialect here agrees on.
+ */
+internal function standardName(Function $fn, str::text& $out) : void
+{
+    $name = match ($fn) {
+        Function::count => 'COUNT',
+        Function::countDistinct => 'COUNT',
+        Function::sum => 'SUM',
+        Function::min => 'MIN',
+        Function::max => 'MAX',
+        Function::avg => 'AVG',
+        Function::lower => 'LOWER',
+        Function::upper => 'UPPER',
+        Function::length => 'CHAR_LENGTH',
+        Function::abs => 'ABS',
+        Function::coalesce => 'COALESCE',
+        Function::now => 'CURRENT_TIMESTAMP',
+    };
+    $out->append($name);
+}

@@ -1,0 +1,155 @@
+// what hydragen emits for the test schema, written by hand so the library tests need no codegen
+
+use hydrahon::{Table, Term, Field, Source, Decimal, Bytes, Date, DateTime, Time};
+
+public class UserTable : Source
+{
+    public const Term<int64> $id;
+    public const Term<string> $name;
+    public const Term<string?> $email;
+    public const Term<bool> $active;
+    public const Term<int64> $views;
+    public const Term<int64?> $age;
+    public const Term<DateTime> $createdAt;
+    private Table $source;
+
+    public constructor()
+    {
+        $this->source = Table(name: 'users');
+    }
+
+    public constructor(alias: string $alias)
+    {
+        $this->source = Table(name: 'users', alias: $alias);
+    }
+
+    public constructor(cte: string $name)
+    {
+        $this->source = Table(cte: $name);
+    }
+
+    init
+    {
+        $this->id = $this->source->column<int64>('id');
+        $this->name = $this->source->column<string>('name');
+        $this->email = $this->source->column<string?>('email');
+        $this->active = $this->source->column<bool>('active');
+        $this->views = $this->source->column<int64>('views');
+        $this->age = $this->source->column<int64?>('age');
+        $this->createdAt = $this->source->column<DateTime>('created_at');
+    }
+
+    public const function table() : Table
+    {
+        return $this->source;
+    }
+
+    public const function all() : Field
+    {
+        return $this->source->star();
+    }
+}
+
+public class PostTable : Source
+{
+    public const Term<int64> $id;
+    public const Term<int64> $userId;
+    public const Term<string> $title;
+    public const Term<Decimal?> $price;
+    private Table $source;
+
+    public constructor()
+    {
+        $this->source = Table(name: 'posts', $schema: 'blog');
+    }
+
+    public constructor(alias: string $alias)
+    {
+        $this->source = Table(name: 'posts', alias: $alias, $schema: 'blog');
+    }
+
+    public constructor(cte: string $name)
+    {
+        $this->source = Table(cte: $name);
+    }
+
+    init
+    {
+        $this->id = $this->source->column<int64>('id');
+        $this->userId = $this->source->column<int64>('user_id');
+        $this->title = $this->source->column<string>('title');
+        $this->price = $this->source->column<Decimal?>('price');
+    }
+
+    public const function table() : Table
+    {
+        return $this->source;
+    }
+
+    public const function all() : Field
+    {
+        return $this->source->star();
+    }
+}
+
+/**
+ * One column of every value kind, plain and nullable, for the operator and function tables.
+ */
+public class KindTable : Source
+{
+    public const Term<int64> $i;
+    public const Term<int64?> $ni;
+    public const Term<uint64> $u;
+    public const Term<uint64?> $nu;
+    public const Term<float64> $f;
+    public const Term<float64?> $nf;
+    public const Term<Decimal> $d;
+    public const Term<Decimal?> $nd;
+    public const Term<bool> $b;
+    public const Term<bool?> $nb;
+    public const Term<string> $s;
+    public const Term<string?> $ns;
+    public const Term<Bytes> $x;
+    public const Term<Bytes?> $nx;
+    public const Term<Date> $day;
+    public const Term<Date?> $nday;
+    public const Term<DateTime> $at;
+    public const Term<DateTime?> $nat;
+    public const Term<Time> $time;
+    public const Term<Time?> $ntime;
+    private Table $source;
+
+    public constructor()
+    {
+        $this->source = Table(name: 'k');
+    }
+
+    init
+    {
+        $this->i = $this->source->column<int64>('i');
+        $this->ni = $this->source->column<int64?>('ni');
+        $this->u = $this->source->column<uint64>('u');
+        $this->nu = $this->source->column<uint64?>('nu');
+        $this->f = $this->source->column<float64>('f');
+        $this->nf = $this->source->column<float64?>('nf');
+        $this->d = $this->source->column<Decimal>('d');
+        $this->nd = $this->source->column<Decimal?>('nd');
+        $this->b = $this->source->column<bool>('b');
+        $this->nb = $this->source->column<bool?>('nb');
+        $this->s = $this->source->column<string>('s');
+        $this->ns = $this->source->column<string?>('ns');
+        $this->x = $this->source->column<Bytes>('x');
+        $this->nx = $this->source->column<Bytes?>('nx');
+        $this->day = $this->source->column<Date>('day');
+        $this->nday = $this->source->column<Date?>('nday');
+        $this->at = $this->source->column<DateTime>('at');
+        $this->nat = $this->source->column<DateTime?>('nat');
+        $this->time = $this->source->column<Time>('time');
+        $this->ntime = $this->source->column<Time?>('ntime');
+    }
+
+    public const function table() : Table
+    {
+        return $this->source;
+    }
+}

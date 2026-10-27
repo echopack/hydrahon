@@ -1,0 +1,188 @@
+// each test pins a statement that rendered fine but meant something else, or nothing, on one
+// of the servers
+
+use hydrahon::{Select, Delete, Insert, Update, Mysql, Postgres, Sqlite, Term, Decimal, Sql};
+use hydrahon::fn;
+
+test row_counts_stay_in_int64
+{
+    // Postgres and SQLite refuse a LIMIT or OFFSET past the largest int64
+    $u = UserTable();
+    $all = Select(from: $u)->limit(18446744073709551615);
+    assert(text<Postgres, Select>($all) == 'SELECT * FROM "users" LIMIT 9223372036854775807');
+    $far = Select(from: $u)->offset(18446744073709551615);
+    assert(text<Sqlite, Select>($far) == 'SELECT * FROM "users" LIMIT -1 OFFSET 9223372036854775807');
+    assert(text<Mysql, Select>($far) == 'SELECT * FROM `users` LIMIT 18446744073709551615 OFFSET 9223372036854775807');
+}
+
+test integer_division_truncates_everywhere
+{
+    // MySQL's `/` yields a DECIMAL fraction even between integers
+    $u = UserTable();
+    $k = KindTable();
+    Term<int64> $half = $u->views / 2;
+    Term<int64> $rest = $u->views % 2;
+    $q = Select(from: $u)->fields([$half, $rest]);
+    assert(text<Mysql, Select>($q) == 'SELECT `users`.`views` DIV ?, `users`.`views` % ? FROM `users`');
+    assert(text<Postgres, Select>($q) == 'SELECT "users"."views" / $1, "users"."views" % $2 FROM "users"');
+    Term<uint64?> $share = $k->u / $k->nu;
+    assert(text<Mysql, Select>(Select(from: $k)->fields([$share])) == 'SELECT `k`.`u` DIV `k`.`nu` FROM `k`');
+    // a fraction stays a fraction
+    assert(text<Mysql, Select>(Select(from: $k)->fields([$k->f / 2.0, $k->d / Decimal('3')])) == 'SELECT `k`.`f` / ?, `k`.`d` / ? FROM `k`');
+}
+
+test a_divisor_column_may_be_zero
+{
+    // MySQL and SQLite answer a division by zero with NULL, so the quotient of two columns is
+    // nullable even when both are not
+    $u = UserTable();
+    $k = KindTable();
+    Term<int64?> $ratio = $u->views / $u->id;
+    Term<int64?> $left = $u->views % $u->id;
+    Term<float64?> $part = $k->f / $k->f;
+    Term<Decimal?> $piece = $k->d / $k->d;
+    assert(text<Sqlite, Select>(Select(from: $u)->fields([$ratio, $left])) == 'SELECT "users"."views" / "users"."id", "users"."views" % "users"."id" FROM "users"');
+    assert(text<Sqlite, Select>(Select(from: $k)->fields([$part, $piece])) == 'SELECT "k"."f" / "k"."f", "k"."d" / "k"."d" FROM "k"');
+}
+
+test a_literal_zero_divisor_fails
+{
+    $u = UserTable();
+    $k = KindTable();
+    string $zero = 'invalid statement: division by a literal zero';
+    assert(fails<Postgres, Select>(Select(from: $u)->fields([$u->views / 0])) == $zero);
+    assert(fails<Mysql, Select>(Select(from: $u)->where($u->views % 0 == 1)) == $zero);
+    assert(fails<Sqlite, Select>(Select(from: $k)->fields([$k->nf / 0.0])) == $zero);
+    assert(fails<Sqlite, Select>(Select(from: $k)->fields([$k->d / Decimal('-0.00e5')])) == $zero);
+    assert(fails<Sqlite, Select>(Select(from: $k)->fields([$k->d / Decimal('0.01')])) == '');
+    assert(fails<Sqlite, Select>(Select(from: $k)->fields([$k->u / 0])) == $zero);
+}
+
+test count_renames_repeated_columns
+{
+    // a derived table may not repeat a column name, which MySQL enforces
+    $u = UserTable();
+    $p = PostTable(alias: 'p');
+    $q = Select(from: $u)->join(inner: $p, on: $p->userId == $u->id)->fields([$u->id, $p->id, $p->title->named('id_1'), $u->name])->distinct();
+    assert(text<Mysql, Select>($q->count()) == 'SELECT COUNT(*) AS `count` FROM (SELECT DISTINCT `users`.`id`, `p`.`id` AS `id_2`, `p`.`title` AS `id_1`, `users`.`name` FROM `users` INNER JOIN `blog`.`posts` AS `p` ON `p`.`user_id` = `users`.`id`) AS `_h`');
+    $b = Select(from: $p)->fields([$p->id, $p->userId]);
+    $both = Select(from: $u)->fields([$u->id, $u->id])->union($b);
+    assert(text<Mysql, Select>($both->count()) == 'SELECT COUNT(*) AS `count` FROM (SELECT `users`.`id`, `users`.`id` AS `id_1` FROM `users` UNION SELECT `p`.`id`, `p`.`user_id` FROM `blog`.`posts` AS `p`) AS `_h`');
+}
+
+test count_drops_columns_that_cannot_change_it
+{
+    $u = UserTable();
+    $p = PostTable(alias: 'p');
+    $grouped = Select(from: $u)->join(inner: $p, on: $p->userId == $u->id)->fields([$u->id, $p->id])->group([$u->id, $p->id])->limit(3);
+    assert(text<Mysql, Select>($grouped->count()) == 'SELECT COUNT(*) AS `count` FROM (SELECT 1 FROM `users` INNER JOIN `blog`.`posts` AS `p` ON `p`.`user_id` = `users`.`id` GROUP BY `users`.`id`, `p`.`id` LIMIT 3) AS `_h`');
+    // an alias stays, a clause may name it
+    $named = Select(from: $u)->fields([$u->name, fn::count()->named('n')])->group([$u->name]);
+    assert(text<Postgres, Select>($named->count()) == 'SELECT COUNT(*) AS "count" FROM (SELECT COUNT(*) AS "n" FROM "users" GROUP BY "users"."name") AS "_h"');
+    // without GROUP BY an aggregate folds every row into one, which `1` would not
+    assert(text<Sqlite, Select>(Select(from: $u)->fields([fn::max($u->views)])->count()) == 'SELECT COUNT(*) AS "count" FROM (SELECT MAX("users"."views") FROM "users") AS "_h"');
+}
+
+test count_skips_an_order_nothing_cuts
+{
+    // without LIMIT or OFFSET the order of the counted rows is a sort for nothing
+    $u = UserTable();
+    $q = Select(from: $u)->group([$u->name])->order([$u->name]);
+    assert(text<Postgres, Select>($q->count()) == 'SELECT COUNT(*) AS "count" FROM (SELECT 1 FROM "users" GROUP BY "users"."name") AS "_h"');
+    $top = Select(from: $u)->group([$u->name])->order([$u->name])->limit(5);
+    assert(text<Postgres, Select>($top->count()) == 'SELECT COUNT(*) AS "count" FROM (SELECT 1 FROM "users" GROUP BY "users"."name" ORDER BY "users"."name" ASC LIMIT 5) AS "_h"');
+}
+
+test count_of_distinct_star_across_a_join
+{
+    // the columns `*` repeats are unknown here, so MySQL cannot count them in a derived table
+    $u = UserTable();
+    $p = PostTable(alias: 'p');
+    $q = Select(from: $u)->join(inner: $p, on: $p->userId == $u->id)->distinct();
+    assert(fails<Mysql, Select>($q->count()) == 'unsupported by this dialect: count of DISTINCT or UNION * across a join');
+    assert(text<Postgres, Select>($q->count()) == 'SELECT COUNT(*) AS "count" FROM (SELECT DISTINCT * FROM "users" INNER JOIN "blog"."posts" AS "p" ON "p"."user_id" = "users"."id") AS "_h"');
+    $one = Select(from: $u)->fields([$u->all()])->distinct();
+    assert(text<Mysql, Select>($one->count()) == 'SELECT COUNT(*) AS `count` FROM (SELECT DISTINCT `users`.* FROM `users`) AS `_h`');
+}
+
+test a_subquery_hiding_an_aliased_target_fails
+{
+    // the target's columns go by the table name, which the subquery's own `users` took over
+    $x = UserTable(alias: 'x');
+    $plain = UserTable();
+    $sub = Select(from: $plain)->fields([fn::max($plain->age)])->where($plain->name == $x->name);
+    $q = Insert(into: $x)->row([$x->name => 'a', $x->email => 'e'])->conflict([$x->email])->update([$x->age => $sub->scalar<int64?>()]);
+    assert(fails<Postgres, Insert>($q) == 'invalid statement: a subquery reads the insert target under its table name, which hides the target row');
+    // the subquery's own columns are fine
+    $own = Select(from: $plain)->fields([fn::max($plain->age)])->where($plain->active);
+    $r = Insert(into: $x)->row([$x->name => 'a', $x->email => 'e'])->conflict([$x->email])->update([$x->age => $own->scalar<int64?>()]);
+    // MySQL refuses any subquery on the target there (error 1093), so only Postgres runs it live
+    Sql $s = guard $r->sql<Postgres>();
+    dump('postgres', $s);
+    assert($s->text == 'INSERT INTO "users" ("name", "email") VALUES ($1, $2) ON CONFLICT ("email") DO UPDATE SET "age" = (SELECT MAX("users"."age") FROM "users" WHERE "users"."active")');
+}
+
+test raw_skips_quotes_the_dialect_way
+{
+    // MySQL escapes quotes with a backslash, so `\'` does not end the string
+    $u = UserTable();
+    $q = Select(from: $u)->where(hydrahon::raw<bool>("name <> 'it\\'s ?' AND id = ?", [7]));
+    Sql $m = guard $q->sql<Mysql>();
+    dump('mysql', $m);
+    assert($m->text == "SELECT * FROM `users` WHERE name <> 'it\\'s ?' AND id = ?");
+    assert($m->params->count() == 1);
+    // Postgres reads E'' strings with escapes and $$ strings verbatim
+    $e = Select(from: $u)->where(hydrahon::raw<bool>("name <> E'it\\'s ?' AND name <> $tag$why?$tag$ AND id = ?", [7]));
+    Sql $p = guard $e->sql<Postgres>();
+    dump('postgres', $p);
+    assert($p->text == "SELECT * FROM \"users\" WHERE name <> E'it\\'s ?' AND name <> $tag$why?$tag$ AND id = $1");
+    assert(fails<Mysql, Select>($e) == 'invalid statement: raw placeholders and params differ in count');
+    // and a doubled quote stands for itself everywhere
+    $d = Select(from: $u)->where(hydrahon::raw<bool>("name <> 'it''s ?' AND id = ?", [7]));
+    assert(text<Sqlite, Select>($d) == "SELECT * FROM \"users\" WHERE name <> 'it''s ?' AND id = ?");
+}
+
+test raw_skips_comments
+{
+    $u = UserTable();
+    $q = Select(from: $u)->where(hydrahon::raw<bool>('/* why? */ id > ? -- and why?', [1]));
+    assert(text<Postgres, Select>($q) == 'SELECT * FROM "users" WHERE /* why? */ id > $1 -- and why?');
+    assert(text<Mysql, Select>($q) == 'SELECT * FROM `users` WHERE /* why? */ id > ? -- and why?');
+    // MySQL comments with `#`, and `--` only before whitespace
+    $hash = Select(from: $u)->where(hydrahon::raw<bool>('id > ? # why?', [1]));
+    Sql $m = guard $hash->sql<Mysql>();
+    dump('mysql', $m);
+    assert($m->params->count() == 1);
+    $minus = Select(from: $u)->where(hydrahon::raw<bool>('id > 1--?', [1]));
+    Sql $n = guard $minus->sql<Mysql>();
+    dump('mysql', $n);
+    assert($n->text == 'SELECT * FROM `users` WHERE id > 1--?');
+    assert($n->params->count() == 1);
+    assert(fails<Postgres, Select>($minus) == 'invalid statement: raw placeholders and params differ in count');
+}
+
+test mariadb_takes_with_only_before_select
+{
+    $u = UserTable();
+    Mysql $maria = Mysql($mariadb: true);
+    $up = Update($u)->with(name: 'c', Select(from: $u))->set([$u->views => 0]);
+    $r = $up->sql($maria);
+    assert(str::from($r->failure()) == 'unsupported by this dialect: WITH before UPDATE');
+    assert(fails<Mysql, Update>($up) == '');
+    $del = Delete(from: $u)->with(name: 'c', Select(from: $u));
+    $s = $del->sql($maria);
+    assert(str::from($s->failure()) == 'unsupported by this dialect: WITH before DELETE');
+    // MariaDB refuses the row alias, so the upsert keeps VALUES()
+    Mysql $both = Mysql($rowAlias: true, $mariadb: true);
+    $ins = Insert(into: $u)->row([$u->name => 'a'])->conflict()->update(inserted: [$u->name]);
+    Sql $i = guard $ins->sql($both);
+    assert($i->text == 'INSERT INTO `users` (`name`) VALUES (?) ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)');
+}
+
+test empty_rows_are_no_rows
+{
+    $u = UserTable();
+    assert(fails<Postgres, Insert>(Insert(into: $u)->row([])) == 'invalid statement: insert without rows');
+    assert(fails<Postgres, Insert>(Insert(into: $u)->row([])->row([])) == 'invalid statement: insert without rows');
+    assert(fails<Postgres, Insert>(Insert(into: $u)->row([$u->name => 'a'])->row([])) == 'invalid statement: insert rows set different columns');
+}

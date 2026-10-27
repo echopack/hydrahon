@@ -1,0 +1,55 @@
+/**
+ * hydragen, the command line.
+ */
+
+use std::env;
+use std::io;
+
+function usage() : void
+{
+    io::println('usage: hydragen [generate|check] [options]');
+    io::println('');
+    io::println('  generate         write .hydrahon/tables.eco for this module (the default)');
+    io::println('  check            exit 1 when .hydrahon/tables.eco is out of date');
+    io::println('');
+    io::println('  --echoc <path>   the compiler, default $ECHOC or echoc on PATH');
+    io::println('  --quiet          say nothing on success');
+}
+
+array<string> $argv = env::argv();
+string $command = 'generate';
+hydragen::Generator $generator = hydragen::Generator();
+$generator->echoc = string::from(env::var('ECHOC', 'echoc'));
+
+usize $i = 1;
+while ($i < $argv->count()) {
+    string $a = $argv[$i];
+    if ($a == '--echoc' && $i + 1 < $argv->count()) {
+        $generator->echoc = $argv[$i + 1];
+        $i = $i + 2;
+        continue;
+    }
+    if ($a == '--quiet') {
+        $generator->quiet = true;
+    } else if ($a == 'generate' || $a == 'check') {
+        $command = $a;
+    } else {
+        usage();
+        if ($a == 'help' || $a == '--help' || $a == '-h') {
+            env::exit(0);
+        }
+        env::exit(2);
+    }
+    $i = $i + 1;
+}
+
+status<hydragen::Failure> $done = .ok;
+if ($command == 'check') {
+    $done = $generator->check();
+} else {
+    $done = $generator->generate();
+}
+guard $done else ($e) {
+    io::eprintln("hydragen: {$e->message()}");
+    env::exit(1);
+}

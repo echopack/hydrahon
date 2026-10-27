@@ -1,0 +1,188 @@
+// the generated operator table: every overload shape on int64, then each other kind
+
+use hydrahon::{Select, Term, Decimal, Bytes, Date, DateTime, Time};
+
+test equality_shapes
+{
+    $k = KindTable();
+    int64? $none = null;
+    int64? $seven = 7;
+    assert(cond($k->i == 1) == '"k"."i" = $1');
+    assert(cond($k->i == $k->i) == '"k"."i" = "k"."i"');
+    assert(cond($k->ni == $seven) == '"k"."ni" = $1');
+    assert(cond($k->ni == $none) == '"k"."ni" IS NULL');
+    assert(cond($k->ni == $k->ni) == '"k"."ni" = "k"."ni"');
+    assert(cond($k->ni == $k->i) == '"k"."ni" = "k"."i"');
+    assert(cond($k->i == $k->ni) == '"k"."i" = "k"."ni"');
+    assert(cond($k->i != 1) == '"k"."i" <> $1');
+    assert(cond($k->i != $k->i) == '"k"."i" <> "k"."i"');
+    assert(cond($k->ni != $seven) == '"k"."ni" <> $1');
+    assert(cond($k->ni != $none) == '"k"."ni" IS NOT NULL');
+    assert(cond($k->ni != $k->ni) == '"k"."ni" <> "k"."ni"');
+    assert(cond($k->ni != $k->i) == '"k"."ni" <> "k"."i"');
+    assert(cond($k->i != $k->ni) == '"k"."i" <> "k"."ni"');
+    assert(bound($k->ni == $seven) == 'I');
+    assert(bound($k->ni == $none) == '');
+}
+
+test ordering_shapes
+{
+    $k = KindTable();
+    assert(cond($k->i < 1) == '"k"."i" < $1');
+    assert(cond($k->i <= $k->i) == '"k"."i" <= "k"."i"');
+    assert(cond($k->ni > 1) == '"k"."ni" > $1');
+    assert(cond($k->ni >= $k->ni) == '"k"."ni" >= "k"."ni"');
+    assert(cond($k->ni < $k->i) == '"k"."ni" < "k"."i"');
+    assert(cond($k->i > $k->ni) == '"k"."i" > "k"."ni"');
+    assert(cond($k->i <= 2) == '"k"."i" <= $1');
+    assert(cond($k->i >= 2) == '"k"."i" >= $1');
+}
+
+test arithmetic_shapes
+{
+    $k = KindTable();
+    Term<int64> $a = $k->i + 1;
+    Term<int64> $b = $k->i - $k->i;
+    Term<int64?> $c = $k->ni * 2;
+    Term<int64?> $d = $k->ni / $k->ni;
+    Term<int64?> $e = $k->ni % $k->i;
+    Term<int64?> $f = $k->i + $k->ni;
+    Term<int64> $g = $k->i % 3;
+    assert(field($a) == '"k"."i" + $1');
+    assert(field($b) == '"k"."i" - "k"."i"');
+    assert(field($c) == '"k"."ni" * $1');
+    assert(field($d) == '"k"."ni" / "k"."ni"');
+    assert(field($e) == '"k"."ni" % "k"."i"');
+    assert(field($f) == '"k"."i" + "k"."ni"');
+    assert(field($g) == '"k"."i" % $1');
+}
+
+test negation
+{
+    $k = KindTable();
+    Term<int64> $a = -$k->i;
+    Term<int64?> $b = -$k->ni;
+    Term<float64> $c = -$k->f;
+    Term<Decimal?> $d = -$k->nd;
+    assert(field($a) == '-"k"."i"');
+    assert(field($b) == '-"k"."ni"');
+    assert(field($c) == '-"k"."f"');
+    assert(field($d) == '-"k"."nd"');
+    assert(field(-($k->i + 1)) == '-("k"."i" + $1)');
+    assert(field($k->i - -$k->i) == '"k"."i" - -"k"."i"');
+    assert(field($k->i * -$k->i) == '"k"."i" * -"k"."i"');
+}
+
+test unsigned
+{
+    $k = KindTable();
+    uint64? $none = null;
+    assert(cond($k->u == 1) == '"k"."u" = $1');
+    assert(cond($k->nu == $none) == '"k"."nu" IS NULL');
+    assert(cond($k->u > $k->nu) == '"k"."u" > "k"."nu"');
+    assert(field($k->u % 2) == '"k"."u" % $1');
+    assert(field($k->nu + $k->u) == '"k"."nu" + "k"."u"');
+    assert(cond($k->u in [1, 2]) == '"k"."u" IN ($1, $2)');
+    assert(bound($k->u == 18446744073709551615) == 'U');
+}
+
+test floats
+{
+    $k = KindTable();
+    float64? $half = 0.5;
+    assert(cond($k->f < 1.5) == '"k"."f" < $1');
+    assert(cond($k->nf == $half) == '"k"."nf" = $1');
+    assert(field($k->f / $k->nf) == '"k"."f" / "k"."nf"');
+    assert(cond($k->nf in [1.0]) == '"k"."nf" IN ($1)');
+    assert(bound($k->f < 1.5) == 'F');
+}
+
+test decimals
+{
+    $k = KindTable();
+    Decimal? $none = null;
+    assert(cond($k->d >= Decimal('9.99')) == '"k"."d" >= $1');
+    assert(cond($k->nd != $none) == '"k"."nd" IS NOT NULL');
+    assert(field($k->d * Decimal('1.1')) == '"k"."d" * $1');
+    assert(field($k->nd - $k->d) == '"k"."nd" - "k"."d"');
+    assert(bound($k->d == Decimal('1')) == 'D');
+}
+
+test booleans
+{
+    $k = KindTable();
+    bool? $none = null;
+    assert(cond($k->b == true) == '"k"."b" = $1');
+    assert(cond($k->nb == $none) == '"k"."nb" IS NULL');
+    assert(cond($k->nb != $k->b) == '"k"."nb" <> "k"."b"');
+    assert(cond($k->b in [true]) == '"k"."b" IN ($1)');
+    assert(bound($k->b == false) == 'B');
+    assert(cond($k->b && $k->b) == '"k"."b" AND "k"."b"');
+    assert(cond($k->b && $k->nb) == '"k"."b" AND "k"."nb"');
+    assert(cond($k->nb && $k->b) == '"k"."nb" AND "k"."b"');
+    assert(cond($k->nb && $k->nb) == '"k"."nb" AND "k"."nb"');
+    assert(cond($k->b || $k->nb) == '"k"."b" OR "k"."nb"');
+    assert(cond($k->nb || $k->b) == '"k"."nb" OR "k"."b"');
+    assert(cond($k->nb || $k->nb) == '"k"."nb" OR "k"."nb"');
+    assert(cond(!$k->nb) == 'NOT "k"."nb"');
+    assert(cond(!!$k->b) == 'NOT (NOT "k"."b")');
+}
+
+test strings
+{
+    $k = KindTable();
+    string? $none = null;
+    assert(cond($k->s == 'a') == '"k"."s" = $1');
+    assert(cond($k->ns == $none) == '"k"."ns" IS NULL');
+    assert(cond($k->s < $k->ns) == '"k"."s" < "k"."ns"');
+    assert(cond($k->s like 'a%') == '"k"."s" LIKE $1');
+    assert(cond($k->ns like '%b') == '"k"."ns" LIKE $1');
+    assert(cond($k->ns in ['a', 'b']) == '"k"."ns" IN ($1, $2)');
+    assert(bound($k->s like 'a%') == ':a%');
+    // a quote in a value is a parameter, never text
+    assert(cond($k->s == 'it\'s') == '"k"."s" = $1');
+    assert(bound($k->s == 'it\'s') == ':it\'s');
+}
+
+test bytes
+{
+    $k = KindTable();
+    Bytes? $none = null;
+    assert(cond($k->x == Bytes('ab')) == '"k"."x" = $1');
+    assert(cond($k->nx == $none) == '"k"."nx" IS NULL');
+    assert(cond($k->x >= $k->nx) == '"k"."x" >= "k"."nx"');
+    assert(cond($k->x in [Bytes('a'), Bytes('b')]) == '"k"."x" IN ($1, $2)');
+    assert(bound($k->x == Bytes('ab')) == 'X');
+}
+
+test temporal
+{
+    $k = KindTable();
+    Date? $noDay = null;
+    DateTime? $noTime = null;
+    Time? $noClock = null;
+    assert(cond($k->day < Date(2024, 2, 29)) == '"k"."day" < $1');
+    assert(cond($k->nday == $noDay) == '"k"."nday" IS NULL');
+    assert(cond($k->at >= DateTime(2024, 1, 1)) == '"k"."at" >= $1');
+    assert(cond($k->nat != $noTime) == '"k"."nat" IS NOT NULL');
+    assert(cond($k->at < $k->nat) == '"k"."at" < "k"."nat"');
+    assert(cond($k->time > Time(false, 8, 30, 0, 0)) == '"k"."time" > $1');
+    assert(cond($k->ntime == $noClock) == '"k"."ntime" IS NULL');
+    assert(cond($k->day in [Date(2024, 1, 1)]) == '"k"."day" IN ($1)');
+    assert(bound($k->day == Date(2024, 1, 1) && $k->at == DateTime(2024, 1, 1) && $k->time == Time(false, 1, 0, 0, 0)) == 'dtT');
+}
+
+test between_and_in
+{
+    $k = KindTable();
+    assert(cond($k->i->between(1, 9)) == '"k"."i" BETWEEN $1 AND $2');
+    assert(cond($k->ni->between(1, 9)) == '"k"."ni" BETWEEN $1 AND $2');
+    assert(cond($k->s->between('a', 'm')) == '"k"."s" BETWEEN $1 AND $2');
+    assert(cond($k->at->between(DateTime(2024, 1, 1), DateTime(2025, 1, 1))) == '"k"."at" BETWEEN $1 AND $2');
+    assert(cond(($k->i + 1)->between(1, 9)) == '"k"."i" + $1 BETWEEN $2 AND $3');
+    array<string> $none = [];
+    assert(cond($k->ns in $none) == '1 = 0');
+    $ids = Select(from: KindTable())->fields([$k->ni]);
+    assert(cond($k->i->in($ids)) == '"k"."i" IN (SELECT "k"."ni" FROM "k")');
+    assert(cond($k->ns->isNull() || $k->s->isNotNull()) == '"k"."ns" IS NULL OR "k"."s" IS NOT NULL');
+}

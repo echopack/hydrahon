@@ -1,0 +1,30 @@
+namespace hydrahon;
+
+/**
+ * How tightly a node binds, on the scale of `Binary::precedence`. Raw SQL is 0, so it is always
+ * parenthesized below the top level.
+ */
+internal function precedence(const Node& $n) : uint8
+{
+    return match ($n) {
+        Node::binary($op, $xs) => $op->precedence(),
+        Node::unary($op, $x) => $op->precedence(),
+        Node::isNull($negated, $x) => 4,
+        Node::inList($x, $items) => 4,
+        Node::inQuery($x, $q) => 4,
+        Node::between($xs) => 4,
+        Node::raw($sql, $ps) => 0,
+        else => 10,
+    };
+}
+
+/**
+ * Whether `$n` is a bound literal zero.
+ */
+internal function literalZero(const Node& $n) : bool
+{
+    return match ($n) {
+        Node::param($v) => $v->zero(),
+        else => false,
+    };
+}

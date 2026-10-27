@@ -1,0 +1,24 @@
+namespace hydrahon;
+
+/**
+ * Raw SQL as a typed term, for what the catalog does not cover. Each `?` outside a quoted span
+ * or a comment binds the next of `$params`, renumbered for the dialect; a count mismatch fails
+ * the render. Quotes and comments are read the dialect's way (`Dialect::syntax`).
+ * The text is copied as written, so never build it from user input.
+ *
+ * ```echo
+ * Term<bool> $recent = hydrahon::raw<bool>('created_at > ? - INTERVAL 1 DAY', [$now]);
+ * ```
+ */
+public function raw<T>(const string& $sql, array<Value> $params) : Term<T>
+{
+    return Term<T>(.raw($sql, $params));
+}
+
+/**
+ * In an upsert, the value the insert tried to write into `$column`.
+ */
+public function excluded<T>(Term<T> $column) : Term<T>
+{
+    return Term<T>(excluded(own($column->node)));
+}

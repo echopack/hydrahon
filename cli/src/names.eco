@@ -1,0 +1,128 @@
+/**
+ * How Echo names become SQL and handle names.
+ */
+
+namespace hydragen;
+
+public struct Names
+{
+    /**
+     * `createdAt` to `created_at`, `avatarURL` to `avatar_url`, `HTTPCode`
+     * to `http_code`. A break goes before an upper case letter that
+     * follows a lower case one or a digit, and before the last capital of
+     * a run when a lower case letter follows it.
+     */
+    public static function snake(const string& $name) : string
+    {
+        string $out = '';
+        usize $n = $name->size();
+        usize $i = 0;
+        while ($i < $n) {
+            uint8 $b = $name->byte($i);
+            if (Names::upper($b)) {
+                if ($i > 0) {
+                    uint8 $prev = $name->byte($i - 1);
+                    bool $nextLower = $i + 1 < $n && Names::lower($name->byte($i + 1));
+                    if (Names::lower($prev) || Names::digit($prev) || (Names::upper($prev) && $nextLower)) {
+                        $out->push(95);
+                    }
+                }
+                $out->push($b + 32);
+            } else {
+                $out->push($b);
+            }
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    /**
+     * The last segment of a qualified name: `app::User` is `User`.
+     */
+    public static function local(const string& $qualified) : string
+    {
+        usize $at = Names::split($qualified);
+        return $qualified->sub($at, $qualified->size() - $at);
+    }
+
+    /**
+     * Everything before the last segment: `app::models::User` is
+     * `app::models`, a bare `User` is empty.
+     */
+    public static function space(const string& $qualified) : string
+    {
+        usize $at = Names::split($qualified);
+        if ($at < 2) {
+            return '';
+        }
+        return $qualified->sub(0, $at - 2);
+    }
+
+    /**
+     * Whether a name can go into the generated source as a single quoted
+     * literal: no quote, no backslash, no control bytes, not empty.
+     */
+    public static function literal(const string& $name) : bool
+    {
+        if ($name->size() == 0) {
+            return false;
+        }
+        usize $i = 0;
+        while ($i < $name->size()) {
+            uint8 $b = $name->byte($i);
+            if ($b == 39 || $b == 92 || $b < 32) {
+                return false;
+            }
+            $i = $i + 1;
+        }
+        return true;
+    }
+
+    /**
+     * `$text` made safe inside a block comment: a star followed by a slash
+     * would end the comment early, so a space goes between them.
+     */
+    public static function prose(const string& $text) : string
+    {
+        string $out = '';
+        usize $i = 0;
+        while ($i < $text->size()) {
+            uint8 $b = $text->byte($i);
+            $out->push($b);
+            if ($b == 42 && $i + 1 < $text->size() && $text->byte($i + 1) == 47) {
+                $out->push(32);
+            }
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    private static function split(const string& $qualified) : usize
+    {
+        usize $at = 0;
+        usize $i = 0;
+        usize $n = $qualified->size();
+        while ($i + 1 < $n) {
+            if ($qualified->byte($i) == 58 && $qualified->byte($i + 1) == 58) {
+                $at = $i + 2;
+            }
+            $i = $i + 1;
+        }
+        return $at;
+    }
+
+    private static function upper(uint8 $b) : bool
+    {
+        return $b >= 65 && $b <= 90;
+    }
+
+    private static function lower(uint8 $b) : bool
+    {
+        return $b >= 97 && $b <= 122;
+    }
+
+    private static function digit(uint8 $b) : bool
+    {
+        return $b >= 48 && $b <= 57;
+    }
+}

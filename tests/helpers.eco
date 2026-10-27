@@ -1,0 +1,145 @@
+use hydrahon::{Dialect, Sql, Error, Binder, Decimal, Bytes, Date, DateTime, Time, Mysql, Postgres, Sqlite, Select, Term, Field};
+use std::io;
+
+/**
+ * The SQL text of `$q` in dialect `D`, which has to render.
+ */
+function text<D : Dialect, S>(const S& $q) : string
+{
+    return render<D, S>($q)->text;
+}
+
+/**
+ * The rendered statement, text and params.
+ */
+function render<D : Dialect, S>(const S& $q) : Sql
+{
+    Sql $s = guard $q->sql<D>();
+    dumpAll($q);
+    return $s;
+}
+
+/**
+ * With HYDRAHON_DUMP set to a directory, append `$q` in every dialect that renders it to
+ * `<dialect>.sql` there, one statement per line, for scripts/test-live.sh to run against real
+ * servers. MariaDB gets its own file, rendered with `Mysql(mariadb: true)`.
+ */
+function dumpAll<S>(const S& $q) : void
+{
+    if (std::env::var('HYDRAHON_DUMP') == null) {
+        return;
+    }
+    $m = $q->sql<Mysql>();
+    if ($m->has_value()) {
+        dump('mysql', $m->unwrap());
+    }
+    Mysql $maria = Mysql($mariadb: true);
+    $a = $q->sql($maria);
+    if ($a->has_value()) {
+        dump('mariadb', $a->unwrap());
+    }
+    $p = $q->sql<Postgres>();
+    if ($p->has_value()) {
+        dump('postgres', $p->unwrap());
+    }
+    $l = $q->sql<Sqlite>();
+    if ($l->has_value()) {
+        dump('sqlite', $l->unwrap());
+    }
+}
+
+/**
+ * Append one rendered statement to `<$name>.sql` in the HYDRAHON_DUMP directory, if set.
+ */
+function dump(const string& $name, const Sql& $s) : void
+{
+    string::view? $dir = std::env::var('HYDRAHON_DUMP');
+    if ($dir == null) {
+        return;
+    }
+    string::view $d = guard $dir;
+    string $path = "{$d}/{$name}.sql";
+    io::file $f = guard io::append($path);
+    string $line = $s->text;
+    $line->push(10);
+    guard $f->write($line);
+    $f->close();
+}
+
+/**
+ * Why `$q` does not render in dialect `D`, as text; empty when it renders.
+ */
+function fails<D : Dialect, S>(const S& $q) : string
+{
+    $r = $q->sql<D>();
+    if ($r->has_value()) {
+        return '';
+    }
+    return str::from($r->failure());
+}
+
+/**
+ * A binder that writes one letter per value kind, and the text values after a colon.
+ */
+struct Dump : Binder
+{
+    string $kinds = '';
+
+    function none() : void { $this->kinds->append('N'); }
+    function bool(bool $v) : void { $this->kinds->append('B'); }
+    function int(int64 $v) : void { $this->kinds->append('I'); }
+    function uint(uint64 $v) : void { $this->kinds->append('U'); }
+    function float(float64 $v) : void { $this->kinds->append('F'); }
+    function decimal(const Decimal& $v) : void { $this->kinds->append('D'); }
+    function text(const string& $v) : void { $this->kinds->append(':'); $this->kinds->append($v); }
+    function bytes(const Bytes& $v) : void { $this->kinds->append('X'); }
+    function date(const Date& $v) : void { $this->kinds->append('d'); }
+    function datetime(const DateTime& $v) : void { $this->kinds->append('t'); }
+    function time(const Time& $v) : void { $this->kinds->append('T'); }
+}
+
+function kinds(const Sql& $s) : string
+{
+    Dump $d = Dump();
+    $s->bind($d);
+    return $d->kinds;
+}
+
+/**
+ * `$c` as the WHERE clause of a Postgres select over the kinds table, which numbers its
+ * placeholders. Every dialect renders it on the way, for the live check.
+ */
+function cond(Term<bool> $c) : string
+{
+    string $t = text<Postgres, Select>(Select(from: KindTable())->where($c));
+    return after($t, ' WHERE ');
+}
+
+/**
+ * The params `$c` binds, as `kinds()` letters.
+ */
+function bound(Term<bool> $c) : string
+{
+    return kinds(render<Postgres, Select>(Select(from: KindTable())->where($c)));
+}
+
+/**
+ * `$f` as the select list of a Postgres select over the kinds table.
+ */
+function field(Field $f) : string
+{
+    string $t = text<Postgres, Select>(Select(from: KindTable())->fields([$f]));
+    string $list = after($t, 'SELECT ');
+    return string::from($list->sub(0, $list->size() - ' FROM "k"'->size()));
+}
+
+/**
+ * What follows the first `$marker` in `$text`.
+ */
+function after(const string& $text, const string& $marker) : string
+{
+    usize $at = $text->find($marker);
+    assert($at < $text->size());
+    usize $from = $at + $marker->size();
+    return string::from($text->sub($from, $text->size() - $from));
+}

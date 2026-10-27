@@ -1,0 +1,20 @@
+/*
+ * hydrahon: a typed SQL query compiler for Echo.
+ *
+ * Statements are plain structs built from schema handles that hydragen
+ * generates out of #[hydrahon::table] structs. Conditions are operator
+ * expressions over typed terms, so a mistyped column or value is a compile
+ * error. A dialect (MySQL, Postgres, SQLite) renders a statement into SQL
+ * text plus bound parameters; running it is the driver's job.
+ */
+
+#[module: "hydrahon"]
+#[version: "0.1.0"]
+#[epm::license: "MIT"]
+#[epm::description: "a typed sql query compiler for mysql, postgres and sqlite"]
+
+#[sources: ["src/*.eco", "src/dialect/*.eco"]]
+
+#[target: test] {
+    #[sources: "tests/*.eco"]
+}

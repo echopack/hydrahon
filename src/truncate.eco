@@ -1,0 +1,74 @@
+namespace hydrahon;
+
+/**
+ * Empty a table. SQLite has no TRUNCATE and gets the unconditional DELETE that it optimizes the
+ * same way.
+ */
+public struct Truncate
+{
+    internal Table $table;
+
+    public constructor(Source $source)
+    {
+        $this->table = $source->table();
+    }
+
+    public constructor(Table $table)
+    {
+        $this->table = $table;
+    }
+
+    public const function sql<D : Dialect>(const D& $dialect) : result<Sql, Error>
+    {
+        $r = Renderer<D>($dialect);
+        $r->truncate($this);
+        return $r->finish();
+    }
+
+    public const function sql<D : Dialect>() : result<Sql, Error>
+    {
+        D $dialect = D();
+        return $this->sql($dialect);
+    }
+}
+
+/**
+ * Drop a table.
+ */
+public struct Drop
+{
+    internal Table $table;
+    internal bool $guarded = false;
+
+    public constructor(Source $source)
+    {
+        $this->table = $source->table();
+    }
+
+    public constructor(Table $table)
+    {
+        $this->table = $table;
+    }
+
+    /**
+     * Do nothing when the table is not there.
+     */
+    public function ifExists() : Drop&
+    {
+        $this->guarded = true;
+        return $this;
+    }
+
+    public const function sql<D : Dialect>(const D& $dialect) : result<Sql, Error>
+    {
+        $r = Renderer<D>($dialect);
+        $r->drop($this);
+        return $r->finish();
+    }
+
+    public const function sql<D : Dialect>() : result<Sql, Error>
+    {
+        D $dialect = D();
+        return $this->sql($dialect);
+    }
+}

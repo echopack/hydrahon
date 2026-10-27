@@ -1,0 +1,236 @@
+/**
+ * The #[hydrahon::table] structs of a module, read from its decls JSON and
+ * checked. Every misuse becomes a `file:line` problem; nothing is guessed.
+ */
+
+namespace hydragen;
+
+/**
+ * One column: the Echo field it comes from, its SQL name, and the `T` of
+ * its `hydrahon::Term<T>`.
+ */
+public struct Column
+{
+    public string $property;
+    public string $name;
+    public string $type;
+}
+
+/**
+ * One table handle to generate.
+ */
+public struct Table
+{
+    public string $qualified;
+    public string $name;
+    public string $schema;
+    public array<Column> $columns;
+
+    public const function space() : string
+    {
+        return Names::space($this->qualified);
+    }
+
+    /**
+     * The generated class: `app::User` gets `UserTable`.
+     */
+    public const function handle() : string
+    {
+        $local = Names::local($this->qualified);
+        return "{$local}Table";
+    }
+}
+
+/**
+ * The property of a generated handle that holds its `hydrahon::Table`.
+ */
+const string RESERVED = 'hydrahonTable';
+
+public class Schema
+{
+    public array<Table> $tables = array<Table>();
+    public array<string> $problems = array<string>();
+    // every declaration's qualified name, so a handle can't take one that exists
+    private array<string> $declared = array<string>();
+
+    public static function read(const json::Value& $decls) : Schema
+    {
+        Schema $s = Schema();
+        foreach (Json::items($decls, 'modules') as const &$m) {
+            foreach (Json::items($m, 'declarations') as const &$d) {
+                $s->declared->push(Json::text($d, 'qualified'));
+            }
+        }
+        foreach (Json::items($decls, 'modules') as const &$m) {
+            foreach (Json::items($m, 'declarations') as const &$d) {
+                $s->declaration($d);
+            }
+        }
+        return $s;
+    }
+
+    private function declaration(const json::Value& $d) : void
+    {
+        string $kind = Json::text($d, 'kind');
+        string $q = Json::text($d, 'qualified');
+        string $at = Schema::where($d, Json::int($d, 'line'));
+        bool $marked = Json::has($d, 'table');
+        if (!$marked) {
+            if (Json::tools($d)->count() > 0) {
+                $this->problems->push("{$at}: {$q}: #[hydrahon::...] needs #[hydrahon::table] on the same type");
+            }
+            foreach (Json::items($d, 'fields') as const &$f) {
+                if (Json::tools($f)->count() > 0) {
+                    string $fat = Schema::where($d, Json::int($f, 'line'));
+                    $this->problems->push("{$fat}: {$q}: field attributes need #[hydrahon::table] on the type");
+                }
+            }
+            return;
+        }
+        if ($kind != 'struct' && $kind != 'class') {
+            $this->problems->push("{$at}: {$q}: #[hydrahon::table] belongs on a struct or a class");
+            return;
+        }
+        $this->known($d, ['table', 'schema', 'columns'], $at, $q);
+        string $name = Json::tool($d, 'table');
+        if (!Names::literal($name)) {
+            $this->problems->push("{$at}: {$q}: #[hydrahon::table] needs the table name: #[hydrahon::table: 'users']");
+            return;
+        }
+        string $schema = Json::tool($d, 'schema');
+        if (Json::has($d, 'schema') && !Names::literal($schema)) {
+            $this->problems->push("{$at}: {$q}: #[hydrahon::schema] needs a name");
+        }
+        string $columns = Json::tool($d, 'columns');
+        bool $snake = $columns == 'snake';
+        if (Json::has($d, 'columns') && !$snake && $columns != 'verbatim') {
+            $this->problems->push("{$at}: {$q}: #[hydrahon::columns] is 'snake' or 'verbatim'");
+        }
+        array<Column> $cols = array<Column>();
+        foreach (Json::items($d, 'fields') as const &$f) {
+            if (Json::flag($f, 'static')) {
+                continue;
+            }
+            string $field = Json::text($f, 'name');
+            string $fat = Schema::where($d, Json::int($f, 'line'));
+            $this->known($f, ['name', 'skip'], $fat, "{$q}::${$field}");
+            if (Json::has($f, 'skip')) {
+                continue;
+            }
+            if ($field == RESERVED) {
+                $this->problems->push("{$fat}: {$q}::${$field}: the generated handle keeps its table in this name; rename the field or mark it #[hydrahon::skip]");
+                continue;
+            }
+            string $column = $field;
+            if ($snake) {
+                $column = Names::snake($field);
+            }
+            if (Json::has($f, 'name')) {
+                $column = Json::tool($f, 'name');
+                if (!Names::literal($column)) {
+                    $this->problems->push("{$fat}: {$q}::${$field}: #[hydrahon::name] needs a column name");
+                    continue;
+                }
+            }
+            string $type = guard Schema::type(Json::field($f, 'type')) else {
+                $this->problems->push("{$fat}: {$q}::${$field}: no SQL column type for this field; mark it #[hydrahon::skip]");
+                continue;
+            }
+            foreach ($cols as const &$c) {
+                if ($c->name == $column) {
+                    $this->problems->push("{$fat}: {$q}::${$field}: column '{$column}' is already taken by ${$c->property}");
+                }
+            }
+            $cols->push(Column($field, $column, $type));
+        }
+        if ($cols->count() == 0) {
+            $this->problems->push("{$at}: {$q}: #[hydrahon::table] without a single column");
+            return;
+        }
+        Table $table = Table($q, $name, $schema, $cols);
+        string $handle = $table->handle();
+        string $space = $table->space();
+        if ($space->size() > 0) {
+            $handle = "{$space}::{$handle}";
+        }
+        foreach ($this->declared as const &$taken) {
+            if ($taken == $handle) {
+                $this->problems->push("{$at}: {$q}: the generated {$handle} would clash with the declaration of that name");
+                return;
+            }
+        }
+        $this->tables->push($table);
+    }
+
+    /**
+     * Report every #[hydrahon::x] on `$v` whose name is not in `$allowed`.
+     */
+    private function known(const json::Value& $v, const array<string>& $allowed, const string& $at, const string& $what) : void
+    {
+        foreach (Json::tools($v) as const &$t) {
+            string $name = Json::text($t, 'name');
+            bool $ok = false;
+            foreach ($allowed as const &$a) {
+                if ($a == $name) {
+                    $ok = true;
+                }
+            }
+            if (!$ok) {
+                $this->problems->push("{$at}: {$what}: unknown attribute #[hydrahon::{$name}]");
+            }
+        }
+    }
+
+    /**
+     * The term type for a field type, or null when SQL has no column for it.
+     * Integers widen to `int64` (or `uint64`) and floats to `float64`,
+     * which is the width hydrahon's operators compare in.
+     */
+    public static function type(const json::Value& $t) : string?
+    {
+        string $kind = Json::text($t, 'kind');
+        if ($kind == 'optional') {
+            string $inner = guard Schema::type(Json::field($t, 'of')) else {
+                return null;
+            }
+            if ($inner->ends('?')) {
+                return null;
+            }
+            string? $out = "{$inner}?";
+            return $out;
+        }
+        if ($kind == 'string') {
+            string? $s = 'string';
+            return $s;
+        }
+        string $name = Json::text($t, 'name');
+        string? $mapped = null;
+        if ($kind == 'prim') {
+            if ($name == 'int8' || $name == 'int16' || $name == 'int32' || $name == 'int64' || $name == 'uint8' || $name == 'uint16' || $name == 'uint32') {
+                $mapped = 'int64';
+            } else if ($name == 'uint64') {
+                $mapped = 'uint64';
+            } else if ($name == 'float32' || $name == 'float64') {
+                $mapped = 'float64';
+            } else if ($name == 'bool') {
+                $mapped = 'bool';
+            }
+            return $mapped;
+        }
+        if ($kind == 'named') {
+            array<string> $known = ['Decimal', 'Bytes', 'Date', 'DateTime', 'Time'];
+            foreach ($known as const &$k) {
+                if ($name == "hydrahon::{$k}") {
+                    $mapped = $name;
+                }
+            }
+        }
+        return $mapped;
+    }
+
+    private static function where(const json::Value& $d, int64 $line) : string
+    {
+        string $file = Json::text($d, 'file');
+        return "{$file}:{$line}";
+    }
+}

@@ -1,0 +1,300 @@
+use hydrahon::{Insert, Select, Update, Term, Values, Table, Mysql, Postgres, Sqlite, Decimal, Bytes, Date, DateTime, Time};
+use hydrahon::fn;
+
+test insert_one_row
+{
+    $u = UserTable();
+    $q = Insert(into: $u)->row([$u->name => 'Mario', $u->email => null]);
+    $s = render<Mysql, Insert>($q);
+    assert($s->text == 'INSERT INTO `users` (`name`, `email`) VALUES (?, ?)');
+    assert(kinds($s) == ':MarioN');
+    assert(text<Postgres, Insert>($q) == 'INSERT INTO "users" ("name", "email") VALUES ($1, $2)');
+}
+
+test insert_rows_any_order
+{
+    $u = UserTable();
+    $q = Insert(into: $u)
+        ->row([$u->name => 'Mario', $u->email => 'm@x.ch'])
+        ->row([$u->email => 'b@x.ch', $u->name => 'Boris']);
+    $s = render<Postgres, Insert>($q);
+    assert($s->text == 'INSERT INTO "users" ("name", "email") VALUES ($1, $2), ($3, $4)');
+    assert(kinds($s) == ':Mario:m@x.ch:Boris:b@x.ch');
+}
+
+test insert_expression_value
+{
+    $u = UserTable();
+    $q = Insert(into: $u)->row([$u->name => 'x', $u->createdAt => fn::now()]);
+    assert(text<Sqlite, Insert>($q) == 'INSERT INTO "users" ("name", "created_at") VALUES (?, CURRENT_TIMESTAMP)');
+}
+
+test insert_invalid_shapes
+{
+    $u = UserTable();
+    $p = PostTable();
+    assert(fails<Mysql, Insert>(Insert(into: $u)) == 'invalid statement: insert without rows');
+    $missing = Insert(into: $u)->row([$u->name => 'a', $u->email => 'b'])->row([$u->name => 'c']);
+    assert(fails<Mysql, Insert>($missing) == 'invalid statement: insert rows set different columns');
+    $other = Insert(into: $u)->row([$u->name => 'a'])->row([$u->email => 'c']);
+    assert(fails<Mysql, Insert>($other) == 'invalid statement: insert rows set different columns');
+    $twice = Insert(into: $u)->row([$u->name => 'a', $u->name => 'b']);
+    assert(fails<Mysql, Insert>($twice) == 'invalid statement: a column is set twice');
+    $foreign = Insert(into: $u)->row([$p->title => 'x']);
+    assert(fails<Mysql, Insert>($foreign) == 'invalid statement: a column belongs to another table');
+    $expr = Insert(into: $u)->row([$u->views + 1 => 3]);
+    assert(fails<Mysql, Insert>($expr) == 'invalid statement: an assignment target is not a column');
+    $trailing = Insert(into: $u)->row([$u->name => 'a'])->row([]);
+    assert(fails<Mysql, Insert>($trailing) == 'invalid statement: insert rows set different columns');
+    assert(fails<Mysql, Insert>(Insert(into: $u)->row([])) == 'invalid statement: insert without rows');
+}
+
+test upsert_take_incoming
+{
+    $u = UserTable();
+    $q = Insert(into: $u)->row([$u->name => 'A', $u->email => 'a@b.ch'])->conflict([$u->email])->update(inserted: [$u->name]);
+    assert(text<Mysql, Insert>($q) == 'INSERT INTO `users` (`name`, `email`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)');
+    Mysql $alias = Mysql(true);
+    $a = guard $q->sql($alias);
+    assert($a->text == 'INSERT INTO `users` (`name`, `email`) VALUES (?, ?) AS `new` ON DUPLICATE KEY UPDATE `name` = `new`.`name`');
+    assert(text<Postgres, Insert>($q) == 'INSERT INTO "users" ("name", "email") VALUES ($1, $2) ON CONFLICT ("email") DO UPDATE SET "name" = EXCLUDED."name"');
+    assert(text<Sqlite, Insert>($q) == 'INSERT INTO "users" ("name", "email") VALUES (?, ?) ON CONFLICT ("email") DO UPDATE SET "name" = excluded."name"');
+}
+
+test upsert_expression
+{
+    $u = UserTable();
+    $q = Insert(into: $u)->row([$u->email => 'a@b.ch', $u->views => 1])
+        ->conflict([$u->email])
+        ->update([$u->views => $u->views + 1, $u->name => hydrahon::excluded($u->name)]);
+    $s = render<Postgres, Insert>($q);
+    assert($s->text == 'INSERT INTO "users" ("email", "views") VALUES ($1, $2) ON CONFLICT ("email") DO UPDATE SET "views" = "users"."views" + $3, "name" = EXCLUDED."name"');
+    assert(kinds($s) == ':a@b.chII');
+    assert(text<Mysql, Insert>($q) == 'INSERT INTO `users` (`email`, `views`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `views` = `users`.`views` + ?, `name` = VALUES(`name`)');
+}
+
+test upsert_ignore
+{
+    $u = UserTable();
+    $q = Insert(into: $u)->row([$u->email => 'a@b.ch'])->conflict()->ignore();
+    assert(text<Mysql, Insert>($q) == 'INSERT IGNORE INTO `users` (`email`) VALUES (?)');
+    assert(text<Postgres, Insert>($q) == 'INSERT INTO "users" ("email") VALUES ($1) ON CONFLICT DO NOTHING');
+    $t = Insert(into: $u)->row([$u->email => 'a@b.ch'])->conflict([$u->email])->ignore();
+    assert(text<Sqlite, Insert>($t) == 'INSERT INTO "users" ("email") VALUES (?) ON CONFLICT ("email") DO NOTHING');
+}
+
+test upsert_problems
+{
+    $u = UserTable();
+    $untargeted = Insert(into: $u)->row([$u->email => 'a'])->conflict()->update(inserted: [$u->name]);
+    assert(fails<Mysql, Insert>($untargeted) == '');
+    assert(fails<Postgres, Insert>($untargeted) == 'invalid statement: conflict update needs a target on this dialect');
+    $idle = Insert(into: $u)->row([$u->email => 'a'])->conflict([$u->email]);
+    assert(fails<Postgres, Insert>($idle) == 'invalid statement: conflict without update or ignore');
+    Sqlite $old = Sqlite(3023000);
+    $t = Insert(into: $u)->row([$u->email => 'a'])->conflict([$u->email])->ignore();
+    $r = $t->sql($old);
+    assert(!$r->has_value());
+    assert(str::from($r->failure()) == 'unsupported by this dialect: upsert');
+}
+
+test insert_returning
+{
+    $u = UserTable();
+    $q = Insert(into: $u)->row([$u->name => 'A'])->returning([$u->id, $u->createdAt->named('at')]);
+    assert(text<Postgres, Insert>($q) == 'INSERT INTO "users" ("name") VALUES ($1) RETURNING "id", "created_at" AS "at"');
+    assert(text<Sqlite, Insert>($q) == 'INSERT INTO "users" ("name") VALUES (?) RETURNING "id", "created_at" AS "at"');
+    assert(fails<Mysql, Insert>($q) == 'unsupported by this dialect: RETURNING');
+    Sqlite $old = Sqlite(3034000);
+    $r = $q->sql($old);
+    assert(!$r->has_value());
+}
+
+test insert_ignores_alias
+{
+    // an insert has no alias, so the upsert qualifies the target's columns by its name
+    $x = UserTable(alias: 'x');
+    $q = Insert(into: $x)->row([$x->name => 'a', $x->email => 'e'])->conflict([$x->email])->update([$x->views => $x->views + 1]);
+    assert(text<Mysql, Insert>($q) == 'INSERT INTO `users` (`name`, `email`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `views` = `users`.`views` + ?');
+    assert(text<Postgres, Insert>($q) == 'INSERT INTO "users" ("name", "email") VALUES ($1, $2) ON CONFLICT ("email") DO UPDATE SET "views" = "users"."views" + $3');
+}
+
+test insert_three_rows
+{
+    $u = UserTable();
+    $q = Insert(into: $u)
+        ->row([$u->name => 'a', $u->views => 1])
+        ->row([$u->views => 2, $u->name => 'b'])
+        ->row([$u->name => 'c', $u->views => 3]);
+    $s = render<Postgres, Insert>($q);
+    assert($s->text == 'INSERT INTO "users" ("name", "views") VALUES ($1, $2), ($3, $4), ($5, $6)');
+    assert(kinds($s) == ':aI:bI:cI');
+}
+
+test insert_every_kind
+{
+    $k = KindTable();
+    int64? $ni = null;
+    Term<uint64> $three = hydrahon::raw<uint64>('3', []);
+    Term<float64?> $nothing = hydrahon::raw<float64?>('NULL', []);
+    Term<Date> $today = hydrahon::raw<Date>('CURRENT_DATE', []);
+    $q = Insert(into: $k)->row([
+        $k->i => 1, $k->ni => $ni,
+        $k->u => 2, $k->nu => $three,
+        $k->f => 0.5, $k->nf => $nothing,
+        $k->d => Decimal('1.5'), $k->nd => null,
+        $k->b => true, $k->nb => false,
+        $k->s => 's', $k->ns => 'n',
+        $k->x => Bytes('x'), $k->nx => null,
+        $k->day => Date(2024, 1, 2), $k->nday => $today,
+        $k->at => fn::now(), $k->nat => null,
+        $k->time => Time(), $k->ntime => null,
+    ]);
+    $s = render<Postgres, Insert>($q);
+    assert($s->text == 'INSERT INTO "k" ("i", "ni", "u", "nu", "f", "nf", "d", "nd", "b", "nb", "s", "ns", "x", "nx", "day", "nday", "at", "nat", "time", "ntime") VALUES ($1, $2, $3, 3, $4, NULL, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_DATE, CURRENT_TIMESTAMP, $14, $15, $16)');
+    assert(kinds($s) == 'INUFDNBB:s:nXNdNTN');
+}
+
+test upsert_overwrite_many
+{
+    $u = UserTable();
+    $q = Insert(into: $u)->row([$u->email => 'e', $u->name => 'n', $u->views => 1])
+        ->conflict([$u->email])->update(inserted: [$u->name, $u->views]);
+    assert(text<Mysql, Insert>($q) == 'INSERT INTO `users` (`email`, `name`, `views`) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE `name` = VALUES(`name`), `views` = VALUES(`views`)');
+    Mysql $alias = Mysql(true);
+    $a = guard $q->sql($alias);
+    assert($a->text == 'INSERT INTO `users` (`email`, `name`, `views`) VALUES (?, ?, ?) AS `new` ON DUPLICATE KEY UPDATE `name` = `new`.`name`, `views` = `new`.`views`');
+    assert(text<Postgres, Insert>($q) == 'INSERT INTO "users" ("email", "name", "views") VALUES ($1, $2, $3) ON CONFLICT ("email") DO UPDATE SET "name" = EXCLUDED."name", "views" = EXCLUDED."views"');
+    // a composite target, and the row alias with an expression
+    $p = PostTable();
+    $c = Insert(into: $p)->row([$p->id => 1, $p->userId => 2, $p->title => 't'])
+        ->conflict([$p->userId, $p->title])->update([$p->id => hydrahon::excluded($p->id)]);
+    assert(text<Sqlite, Insert>($c) == 'INSERT INTO "blog"."posts" ("id", "user_id", "title") VALUES (?, ?, ?) ON CONFLICT ("user_id", "title") DO UPDATE SET "id" = excluded."id"');
+    $b = guard $c->sql($alias);
+    assert($b->text == 'INSERT INTO `blog`.`posts` (`id`, `user_id`, `title`) VALUES (?, ?, ?) AS `new` ON DUPLICATE KEY UPDATE `id` = `new`.`id`');
+}
+
+test upsert_keeps_existing_values
+{
+    // the conflicting row of a table in a schema is qualified by its bare name
+    $p = PostTable();
+    $q = Insert(into: $p)->row([$p->id => 1, $p->userId => 2, $p->title => 't'])
+        ->conflict([$p->id])->update([$p->title => $p->title]);
+    assert(text<Mysql, Insert>($q) == 'INSERT INTO `blog`.`posts` (`id`, `user_id`, `title`) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE `title` = `blog`.`posts`.`title`');
+    assert(text<Postgres, Insert>($q) == 'INSERT INTO "blog"."posts" ("id", "user_id", "title") VALUES ($1, $2, $3) ON CONFLICT ("id") DO UPDATE SET "title" = "blog"."posts"."title"');
+}
+
+test upsert_more_problems
+{
+    $u = UserTable();
+    $p = PostTable();
+    $exprTarget = Insert(into: $u)->row([$u->email => 'a'])->conflict([fn::lower($u->name)])->ignore();
+    assert(fails<Postgres, Insert>($exprTarget) == 'invalid statement: an assignment target is not a column');
+    // MySQL has no conflict target, so there is nothing to check
+    assert(fails<Mysql, Insert>($exprTarget) == '');
+    $both = Insert(into: $u)->row([$u->email => 'a'])->conflict([$u->email])->update(inserted: [$u->name])->ignore();
+    assert(fails<Mysql, Insert>($both) == 'invalid statement: conflict without update or ignore');
+    assert(fails<Postgres, Insert>($both) == 'invalid statement: conflict without update or ignore');
+    $notColumn = Insert(into: $u)->row([$u->email => 'a'])->conflict([$u->email])->update(inserted: [$u->views + 1]);
+    assert(fails<Postgres, Insert>($notColumn) == 'invalid statement: an assignment target is not a column');
+    $foreign = Insert(into: $u)->row([$u->email => 'a'])->conflict([$u->email])->update(inserted: [$p->title]);
+    assert(fails<Postgres, Insert>($foreign) == 'invalid statement: a column belongs to another table');
+    $twice = Insert(into: $u)->row([$u->email => 'a'])->conflict([$u->email])->update(inserted: [$u->name])->update([$u->name => 'x']);
+    assert(fails<Postgres, Insert>($twice) == 'invalid statement: a column is set twice');
+    $nowhere = Insert(into: $u)->row([$u->email => 'a'])->conflict([$u->email])->update([$u->views => hydrahon::excluded($u->views + 1)]);
+    assert(fails<Postgres, Insert>($nowhere) == 'invalid statement: an assignment target is not a column');
+    $foreignTarget = Insert(into: $u)->row([$u->email => 'a'])->conflict([$p->title])->ignore();
+    assert(fails<Postgres, Insert>($foreignTarget) == 'invalid statement: a column belongs to another table');
+    $foreignIncoming = Insert(into: $u)->row([$u->email => 'a'])->conflict([$u->email])->update([$u->name => hydrahon::excluded($p->title)]);
+    assert(fails<Postgres, Insert>($foreignIncoming) == 'invalid statement: a column belongs to another table');
+    assert(fails<Mysql, Insert>($foreignIncoming) == 'invalid statement: a column belongs to another table');
+    // the first problem is the one reported, even before the missing rows
+    $first = Insert(into: $u)->row([$p->title => 'x']);
+    assert(fails<Postgres, Insert>($first) == 'invalid statement: a column belongs to another table');
+}
+
+test columns_are_distinct_across_schemas
+{
+    $blog = PostTable();
+    $shop = Table(name: 'posts', $schema: 'shop');
+    Term<int64> $shopId = $shop->column<int64>('id');
+    assert(fails<Postgres, Insert>(Insert(into: $blog)->row([$shopId => 1, $blog->userId => 2, $blog->title => 't'])) == 'invalid statement: a column belongs to another table');
+    $p = PostTable(alias: 'p');
+    Term<int64> $fromShop = Select(from: $shop)->fields([$shopId])->where($shopId == $p->id)->scalar<int64>();
+    $q = Insert(into: $p)->row([$p->id => $fromShop, $p->userId => 1, $p->title => 't']);
+    assert(fails<Postgres, Insert>($q) == '');
+    assert(text<Postgres, Insert>($q) == 'INSERT INTO "blog"."posts" ("id", "user_id", "title") VALUES ((SELECT "posts"."id" FROM "shop"."posts" WHERE "posts"."id" = "blog"."posts"."id"), $1, $2)');
+}
+
+test excluded_is_only_an_insert_value
+{
+    $u = UserTable();
+    $q = Select(from: $u)->fields([hydrahon::excluded($u->name)]);
+    assert(fails<Postgres, Select>($q) == 'invalid statement: an assignment target is not a column');
+    $up = Update($u)->set([$u->name => hydrahon::excluded($u->name)]);
+    assert(fails<Postgres, Update>($up) == 'invalid statement: an assignment target is not a column');
+}
+
+test insert_with
+{
+    $u = UserTable();
+    $q = Insert(into: $u)->row([$u->name => 'a'])->with(name: 'seed', Select(from: $u)->where($u->id == 1));
+    assert(text<Postgres, Insert>($q) == 'WITH "seed" AS (SELECT * FROM "users" WHERE "users"."id" = $1) INSERT INTO "users" ("name") VALUES ($2)');
+    assert(text<Sqlite, Insert>($q) == 'WITH "seed" AS (SELECT * FROM "users" WHERE "users"."id" = ?) INSERT INTO "users" ("name") VALUES (?)');
+    assert(fails<Mysql, Insert>($q) == 'unsupported by this dialect: WITH before INSERT');
+}
+
+test insert_returning_star_and_alias
+{
+    $x = UserTable(alias: 'x');
+    $q = Insert(into: $x)->row([$x->name => 'a'])->returning([$x->all(), $x->id->named('key')]);
+    assert(text<Postgres, Insert>($q) == 'INSERT INTO "users" ("name") VALUES ($1) RETURNING *, "id" AS "key"');
+}
+
+test insert_nullable_entries
+{
+    // a nullable column takes null, a runtime optional, or an expression
+    $u = UserTable();
+    string? $absent = null;
+    string? $present = 'p@x.ch';
+    $q = Insert(into: $u)
+        ->row([$u->name => 'a', $u->email => null])
+        ->row([$u->name => 'b', $u->email => $absent])
+        ->row([$u->name => 'c', $u->email => $present])
+        ->row([$u->name => 'd', $u->email => fn::lower(hydrahon::raw<string>("'D@X.CH'", []))]);
+    $s = render<Postgres, Insert>($q);
+    assert($s->text == 'INSERT INTO "users" ("name", "email") VALUES ($1, $2), ($3, $4), ($5, $6), ($7, LOWER(\'D@X.CH\'))');
+    assert(kinds($s) == ':aN:bN:c:p@x.ch:d');
+}
+
+test insert_values_by_hand
+{
+    $u = UserTable();
+    array<string> $names = ['a', 'b', 'c'];
+    $q = Insert(into: $u);
+    foreach ($names as const &$n) {
+        Values $v = Values();
+        $v[$u->name] = $n;
+        $v[$u->views] = 0;
+        $q->row($v);
+    }
+    $s = render<Postgres, Insert>($q);
+    assert($s->text == 'INSERT INTO "users" ("name", "views") VALUES ($1, $2), ($3, $4), ($5, $6)');
+    assert(kinds($s) == ':aI:bI:cI');
+}
+
+test insert_values_copies_stay_apart
+{
+    // copies share their entries until one changes, and changing one leaves the other alone
+    $u = UserTable();
+    Values $a = Values();
+    $a[$u->name] = 'a';
+    Values $b = $a;
+    $b[$u->views] = 1;
+    $q = Insert(into: $u)->row($a)->row($a);
+    assert(text<Postgres, Insert>($q) == 'INSERT INTO "users" ("name") VALUES ($1), ($2)');
+    $r = Insert(into: $u)->row($b);
+    assert(text<Postgres, Insert>($r) == 'INSERT INTO "users" ("name", "views") VALUES ($1, $2)');
+    $a[$u->email] = null;
+    assert(text<Postgres, Insert>($q) == 'INSERT INTO "users" ("name") VALUES ($1), ($2)');
+}

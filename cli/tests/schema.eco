@@ -1,0 +1,229 @@
+namespace hydragen;
+
+/**
+ * A decls document with one module holding `$declarations`.
+ */
+function decls(const string& $declarations) : json::Value
+{
+    string $text = "\{\"modules\": [\{\"name\": \"app\", \"declarations\": [{$declarations}]}]}";
+    json::Value $v = guard json::parse($text);
+    return $v;
+}
+
+const string USER = '{"kind": "struct", "qualified": "app::User", "file": "src/user.eco", "line": 4, "tools": [{"namespace": "hydrahon", "name": "table", "value": {"kind": "string", "text": "users"}}, {"namespace": "hydrahon", "name": "columns", "value": {"kind": "string", "text": "snake"}}], "fields": [{"name": "id", "static": false, "line": 6, "type": {"kind": "prim", "name": "int32"}, "tools": []}, {"name": "email", "static": false, "line": 7, "type": {"kind": "optional", "of": {"kind": "string"}}, "tools": []}, {"name": "createdAt", "static": false, "line": 8, "type": {"kind": "named", "name": "hydrahon::DateTime"}, "tools": []}, {"name": "fullName", "static": false, "line": 9, "type": {"kind": "string"}, "tools": [{"namespace": "hydrahon", "name": "name", "value": {"kind": "string", "text": "name"}}]}, {"name": "cache", "static": false, "line": 10, "type": {"kind": "array", "of": {"kind": "prim", "name": "int32"}}, "tools": [{"namespace": "hydrahon", "name": "skip", "value": null}]}, {"name": "made", "static": true, "line": 11, "type": {"kind": "prim", "name": "int32"}, "tools": []}]}';
+
+test reads_a_table
+{
+    Schema $s = Schema::read(decls(USER));
+    assert($s->problems->count() == 0);
+    assert($s->tables->count() == 1);
+    const Table& $t = $s->tables[0];
+    assert($t->name == 'users');
+    assert($t->handle() == 'UserTable');
+    assert($t->space() == 'app');
+    assert($t->columns->count() == 4);
+    assert($t->columns[0]->name == 'id' && $t->columns[0]->type == 'int64');
+    assert($t->columns[1]->name == 'email' && $t->columns[1]->type == 'string?');
+    assert($t->columns[2]->name == 'created_at' && $t->columns[2]->type == 'hydrahon::DateTime');
+    assert($t->columns[3]->name == 'name' && $t->columns[3]->property == 'fullName');
+}
+
+test emits_a_handle
+{
+    Schema $s = Schema::read(decls(USER));
+    string $out = Emitter($s)->render();
+    assert($out->contains("namespace app;\n"));
+    assert($out->contains('public class UserTable : hydrahon::Source'));
+    assert($out->contains('    public const hydrahon::Term<string?> $email;'));
+    assert($out->contains("        $this->createdAt = $this->hydrahonTable->column<hydrahon::DateTime>('created_at');"));
+    assert($out->contains("hydrahon::Table(name: 'users', alias: $alias)"));
+}
+
+test reports_problems
+{
+    string $bad = '{"kind": "struct", "qualified": "app::Bad", "file": "src/bad.eco", "line": 2, "tools": [{"namespace": "hydrahon", "name": "table", "value": {"kind": "string", "text": "bad"}}, {"namespace": "hydrahon", "name": "colums", "value": {"kind": "string", "text": "snake"}}], "fields": [{"name": "tags", "static": false, "line": 3, "type": {"kind": "array", "of": {"kind": "string"}}, "tools": []}, {"name": "a", "static": false, "line": 4, "type": {"kind": "string"}, "tools": []}, {"name": "b", "static": false, "line": 5, "type": {"kind": "string"}, "tools": [{"namespace": "hydrahon", "name": "name", "value": {"kind": "string", "text": "a"}}]}]}';
+    string $stray = '{"kind": "struct", "qualified": "app::Plain", "file": "src/plain.eco", "line": 9, "tools": [], "fields": [{"name": "x", "static": false, "line": 10, "type": {"kind": "string"}, "tools": [{"namespace": "hydrahon", "name": "skip", "value": null}]}]}';
+    Schema $s = Schema::read(decls("{$bad}, {$stray}"));
+    assert($s->problems->count() == 4);
+    assert($s->problems[0] == 'src/bad.eco:2: app::Bad: unknown attribute #[hydrahon::colums]');
+    assert($s->problems[1] == 'src/bad.eco:3: app::Bad::$tags: no SQL column type for this field; mark it #[hydrahon::skip]');
+    assert($s->problems[2] == "src/bad.eco:5: app::Bad::$b: column 'a' is already taken by $a");
+    assert($s->problems[3] == 'src/plain.eco:10: app::Plain: field attributes need #[hydrahon::table] on the type');
+}
+
+/**
+ * A `#[hydrahon::<name>]` tool, with a string value or none.
+ */
+function tool(const string& $name, const string& $value) : string
+{
+    if ($value->empty()) {
+        return "\{\"namespace\": \"hydrahon\", \"name\": \"{$name}\", \"value\": null}";
+    }
+    return "\{\"namespace\": \"hydrahon\", \"name\": \"{$name}\", \"value\": \{\"kind\": \"string\", \"text\": \"{$value}\"}}";
+}
+
+/**
+ * A field declaration of type `$type` (JSON), with `$tools`.
+ */
+function field(const string& $name, int32 $line, const string& $type, const string& $tools) : string
+{
+    return "\{\"name\": \"{$name}\", \"static\": false, \"line\": {$line}, \"type\": {$type}, \"tools\": [{$tools}]}";
+}
+
+/**
+ * A struct declaration `$qualified` at `src/t.eco:$line`.
+ */
+function decl(const string& $kind, const string& $qualified, int32 $line, const string& $tools, const string& $fields) : string
+{
+    return "\{\"kind\": \"{$kind}\", \"qualified\": \"{$qualified}\", \"file\": \"src/t.eco\", \"line\": {$line}, \"tools\": [{$tools}], \"fields\": [{$fields}]}";
+}
+
+/**
+ * `$parts` joined by commas, the way the decls JSON lists them.
+ */
+function join(const array<string>& $parts) : string
+{
+    string $out = '';
+    foreach ($parts as const &$p) {
+        if (!$out->empty()) {
+            $out->append(', ');
+        }
+        $out->append($p);
+    }
+    return $out;
+}
+
+const string INT = '{"kind": "prim", "name": "int64"}';
+const string STR = '{"kind": "string"}';
+
+/**
+ * The column type a field of `$type` (JSON) gets, or `-` for none.
+ */
+function columnType(const string& $type) : string
+{
+    json::Value $t = guard json::parse($type);
+    return Schema::type($t) ?? '-';
+}
+
+test field_types
+{
+    array<string> $ints = ['int8', 'int16', 'int32', 'int64', 'uint8', 'uint16', 'uint32'];
+    foreach ($ints as const &$i) {
+        assert(columnType("\{\"kind\": \"prim\", \"name\": \"{$i}\"}") == 'int64');
+    }
+    assert(columnType('{"kind": "prim", "name": "uint64"}') == 'uint64');
+    assert(columnType('{"kind": "prim", "name": "float32"}') == 'float64');
+    assert(columnType('{"kind": "prim", "name": "float64"}') == 'float64');
+    assert(columnType('{"kind": "prim", "name": "bool"}') == 'bool');
+    assert(columnType('{"kind": "prim", "name": "usize"}') == '-');
+    assert(columnType(STR) == 'string');
+    assert(columnType('{"kind": "named", "name": "hydrahon::Decimal"}') == 'hydrahon::Decimal');
+    assert(columnType('{"kind": "named", "name": "hydrahon::Bytes"}') == 'hydrahon::Bytes');
+    assert(columnType('{"kind": "named", "name": "hydrahon::Date"}') == 'hydrahon::Date');
+    assert(columnType('{"kind": "named", "name": "hydrahon::Time"}') == 'hydrahon::Time');
+    assert(columnType('{"kind": "named", "name": "app::Date"}') == '-');
+    assert(columnType('{"kind": "optional", "of": {"kind": "prim", "name": "uint16"}}') == 'int64?');
+    assert(columnType('{"kind": "optional", "of": {"kind": "optional", "of": {"kind": "string"}}}') == '-');
+    assert(columnType('{"kind": "optional", "of": {"kind": "array", "of": {"kind": "string"}}}') == '-');
+}
+
+test table_level_problems
+{
+    string $onEnum = decl('enum', 'app::Mood', 1, tool('table', 'moods'), '');
+    string $unnamed = decl('struct', 'app::A', 2, tool('table', ''), field('id', 3, INT, ''));
+    string $badSchema = decl('struct', 'app::B', 4, join([tool('table', 'b'), tool('schema', '')]), field('id', 5, INT, ''));
+    string $badColumns = decl('struct', 'app::C', 6, join([tool('table', 'c'), tool('columns', 'kebab')]), field('id', 7, INT, ''));
+    string $empty = decl('struct', 'app::D', 8, tool('table', 'd'), field('cache', 9, STR, tool('skip', '')));
+    string $stray = decl('struct', 'app::E', 10, tool('schema', 's'), '');
+    Schema $s = Schema::read(decls("{$onEnum}, {$unnamed}, {$badSchema}, {$badColumns}, {$empty}, {$stray}"));
+    assert($s->problems->count() == 6);
+    assert($s->problems[0] == 'src/t.eco:1: app::Mood: #[hydrahon::table] belongs on a struct or a class');
+    assert($s->problems[1] == 'src/t.eco:2: app::A: #[hydrahon::table] needs the table name: #[hydrahon::table: \'users\']');
+    assert($s->problems[2] == 'src/t.eco:4: app::B: #[hydrahon::schema] needs a name');
+    assert($s->problems[3] == 'src/t.eco:6: app::C: #[hydrahon::columns] is \'snake\' or \'verbatim\'');
+    assert($s->problems[4] == 'src/t.eco:8: app::D: #[hydrahon::table] without a single column');
+    assert($s->problems[5] == 'src/t.eco:10: app::E: #[hydrahon::...] needs #[hydrahon::table] on the same type');
+}
+
+test field_level_problems
+{
+    string $fields = join([field('a', 2, STR, tool('nmae', 'x')), field('b', 3, STR, tool('name', '')), field('c', 4, STR, tool('name', 'it\'s')), field('hydrahonTable', 5, STR, '')]);
+    Schema $s = Schema::read(decls(decl('class', 'app::F', 1, tool('table', 'f'), $fields)));
+    assert($s->problems->count() == 4);
+    assert($s->problems[0] == 'src/t.eco:2: app::F::$a: unknown attribute #[hydrahon::nmae]');
+    assert($s->problems[1] == 'src/t.eco:3: app::F::$b: #[hydrahon::name] needs a column name');
+    assert($s->problems[2] == 'src/t.eco:4: app::F::$c: #[hydrahon::name] needs a column name');
+    assert($s->problems[3] == 'src/t.eco:5: app::F::$hydrahonTable: the generated handle keeps its table in this name; rename the field or mark it #[hydrahon::skip]');
+    // skipped, the reserved name is fine
+    Schema $ok = Schema::read(decls(decl('struct', 'app::G', 1, tool('table', 'g'), join([field('id', 2, INT, ''), field('hydrahonTable', 3, STR, tool('skip', ''))]))));
+    assert($ok->problems->count() == 0);
+}
+
+test handle_clashes
+{
+    string $user = decl('struct', 'app::User', 1, tool('table', 'users'), field('id', 2, INT, ''));
+    string $taken = decl('class', 'app::UserTable', 5, '', '');
+    Schema $s = Schema::read(decls("{$taken}, {$user}"));
+    assert($s->problems->count() == 1);
+    assert($s->problems[0] == 'src/t.eco:1: app::User: the generated app::UserTable would clash with the declaration of that name');
+    // the same name in another namespace is no clash
+    string $elsewhere = decl('class', 'other::UserTable', 5, '', '');
+    assert(Schema::read(decls("{$elsewhere}, {$user}"))->problems->count() == 0);
+    string $global = decl('struct', 'Log', 1, tool('table', 'log'), field('id', 2, INT, ''));
+    string $globalTaken = decl('struct', 'LogTable', 3, '', '');
+    assert(Schema::read(decls("{$global}, {$globalTaken}"))->problems->count() == 1);
+}
+
+test verbatim_and_class_tables
+{
+    string $fields = join([field('createdAt', 2, INT, ''), field('ID', 3, INT, '')]);
+    Schema $s = Schema::read(decls(decl('class', 'Event', 1, join([tool('table', 'events'), tool('columns', 'verbatim'), tool('schema', 'audit')]), $fields)));
+    assert($s->problems->count() == 0);
+    const Table& $t = $s->tables[0];
+    assert($t->space() == '');
+    assert($t->schema == 'audit');
+    assert($t->columns[0]->name == 'createdAt');
+    assert($t->columns[1]->name == 'ID');
+}
+
+test emits_namespaces_in_order
+{
+    string $a = decl('struct', 'b::Two', 1, tool('table', 'two'), field('id', 2, INT, ''));
+    string $b = decl('struct', 'One', 3, tool('table', 'one'), field('id', 4, INT, ''));
+    string $c = decl('struct', 'a::Three', 5, join([tool('table', 'odd */ name'), tool('schema', 'x')]), field('id', 6, INT, ''));
+    string $d = decl('struct', 'b::Four', 7, tool('table', 'four'), field('fullName', 8, STR, tool('name', 'name')));
+    string $out = Emitter(Schema::read(decls("{$a}, {$b}, {$c}, {$d}")))->render();
+    // types outside a namespace come first, then each namespace once, in order of appearance
+    usize $one = $out->find('public class OneTable');
+    usize $b1 = $out->find("namespace b;\n");
+    usize $two = $out->find('public class TwoTable');
+    usize $four = $out->find('public class FourTable');
+    usize $a1 = $out->find("namespace a;\n");
+    usize $three = $out->find('public class ThreeTable');
+    assert($one < $b1 && $b1 < $two && $two < $four && $four < $a1 && $a1 < $three && $three < $out->size());
+    assert($out->find("namespace b;\n", $b1 + 1) == $out->size());
+    assert($out->contains("hydrahon::Table(name: 'odd */ name', $schema: 'x')"));
+    assert($out->contains("hydrahon::Table(name: 'odd */ name', alias: $alias, $schema: 'x')"));
+    assert($out->contains(' * The columns of `odd * /'));
+    assert(!$out->contains('`odd */'));
+    assert($out->contains("        $this->fullName = $this->hydrahonTable->column<string>('name');"));
+    assert($out->contains("hydrahon::Table(cte: $name)"));
+}
+
+test empty_schema_emits_a_header
+{
+    string $out = Emitter(Schema::read(decls('')))->render();
+    assert($out == "// generated by hydragen from #[hydrahon::table] declarations, do not edit\n");
+}
+
+test failure_messages
+{
+    Failure $tool = .tool('exit 3', 'boom');
+    assert($tool->message() == "echoc -p decls failed (exit 3):\nboom");
+    Failure $input = .input('no module.eco here');
+    assert($input->message() == 'no module.eco here');
+    Failure $problems = .problems(2);
+    assert($problems->message() == '2 problem(s) in #[hydrahon::...] declarations');
+    Failure $stale = .stale;
+    assert($stale->message() == '.hydrahon/tables.eco is out of date; run hydragen');
+}

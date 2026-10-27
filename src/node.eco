@@ -1,0 +1,360 @@
+namespace hydrahon;
+
+/**
+ * A binary operator in the expression tree. Logical `and`/`or` live here too, so precedence is
+ * decided in one place when the tree is rendered.
+ */
+public enum Binary
+{
+    case eq;
+    case ne;
+    case lt;
+    case le;
+    case gt;
+    case ge;
+    case like;
+    case add;
+    case sub;
+    case mul;
+    case div;
+    // integer division, truncating toward zero
+    case quot;
+    case mod;
+    case and;
+    case or;
+
+    /**
+     * How tightly the operator binds when rendered. Higher binds tighter; parentheses are only
+     * written where a child binds looser than its parent.
+     */
+    internal const function precedence() : uint8
+    {
+        return match ($this) {
+            Binary::or => 1,
+            Binary::and => 2,
+            Binary::eq => 4,
+            Binary::ne => 4,
+            Binary::lt => 4,
+            Binary::le => 4,
+            Binary::gt => 4,
+            Binary::ge => 4,
+            Binary::like => 4,
+            Binary::add => 5,
+            Binary::sub => 5,
+            Binary::mul => 6,
+            Binary::div => 6,
+            Binary::quot => 6,
+            Binary::mod => 6,
+        };
+    }
+
+    /**
+     * The standard spelling with the spaces around it. A dialect renders through its own
+     * `Dialect::symbol`, which starts from this one.
+     */
+    public const function symbol() : string
+    {
+        return match ($this) {
+            Binary::eq => ' = ',
+            Binary::ne => ' <> ',
+            Binary::lt => ' < ',
+            Binary::le => ' <= ',
+            Binary::gt => ' > ',
+            Binary::ge => ' >= ',
+            Binary::like => ' LIKE ',
+            Binary::add => ' + ',
+            Binary::sub => ' - ',
+            Binary::mul => ' * ',
+            Binary::div => ' / ',
+            Binary::quot => ' / ',
+            Binary::mod => ' % ',
+            Binary::and => ' AND ',
+            Binary::or => ' OR ',
+        };
+    }
+
+    /**
+     * Whether the right operand divides the left, so a zero there has no answer.
+     */
+    internal const function divides() : bool
+    {
+        return match ($this) {
+            Binary::div => true,
+            Binary::quot => true,
+            Binary::mod => true,
+            else => false,
+        };
+    }
+}
+
+/**
+ * A prefix operator in the expression tree.
+ */
+internal enum Unary
+{
+    case not;
+    case neg;
+
+    /**
+     * On the scale of `Binary::precedence`: NOT binds looser than a comparison, a minus tighter
+     * than any binary operator.
+     */
+    internal const function precedence() : uint8
+    {
+        return match ($this) {
+            Unary::not => 3,
+            Unary::neg => 7,
+        };
+    }
+}
+
+/**
+ * A function from the typed catalog in `hydrahon::fn`. Names are rendered by the dialect, never
+ * taken from user text.
+ */
+public enum Function
+{
+    case count;
+    case countDistinct;
+    case sum;
+    case min;
+    case max;
+    case avg;
+    case lower;
+    case upper;
+    case length;
+    case abs;
+    case coalesce;
+    case now;
+
+    /**
+     * Whether the function folds many rows into one value.
+     */
+    internal const function aggregate() : bool
+    {
+        return match ($this) {
+            Function::count => true,
+            Function::countDistinct => true,
+            Function::sum => true,
+            Function::min => true,
+            Function::max => true,
+            Function::avg => true,
+            else => false,
+        };
+    }
+}
+
+/**
+ * Where a column lives: the table it belongs to, the name that qualifies it in a query (the
+ * alias, or the table name without one) and its own name.
+ */
+internal struct Ident
+{
+    internal const Owner $owner;
+    internal const string $name;
+    // the column's number within its owner: equal owner and slot is the same column without
+    // comparing any names
+    internal const uint32 $slot;
+
+    internal const function name() : const string&
+    {
+        return $this->name;
+    }
+
+    /**
+     * Whether this is a column of `$t`'s table, under any name.
+     */
+    internal const function of(const Table& $t) : bool
+    {
+        return $this->of($t->owner);
+    }
+
+    internal const function of(const Owner& $owner) : bool
+    {
+        return $this->owner->sameTable($owner);
+    }
+
+    internal const function through(const Owner& $owner) : bool
+    {
+        return $this->owner->sameTable($owner) && $this->owner->qualifier == $owner->qualifier;
+    }
+
+    /**
+     * Whether this and `$other` name the same column of the same table.
+     */
+    internal const function sameColumn(const Ident& $other) : bool
+    {
+        if ($this->owner == $other->owner) {
+            return $this->slot == $other->slot || $this->name() == $other->name();
+        }
+        return $this->name() == $other->name() && $this->owner->sameTable($other->owner);
+    }
+}
+
+/**
+ * The expression tree. Typed terms wrap a node; the renderer walks it once per dialect.
+ * Children sit in the classes below, which is what lets the tree recurse, and a tree is never
+ * changed once built: copying a node retains its children instead of copying the subtree.
+ */
+internal enum Node
+{
+    case column(Ident $id);
+    case star(string? $qualifier);
+    case param(Value $v);
+    case raw(string $sql, array<Value> $params);
+    case unary(Unary $op, Operand $x);
+    case binary(Binary $op, Operands $xs);
+    case isNull(bool $negated, Operand $x);
+    case inList(Operand $x, NodeList $items);
+    case inQuery(Operand $x, rc<Select> $query);
+    case between(NodeList $xs);
+    case exists(rc<Select> $query);
+    case scalar(rc<Select> $query);
+    case call(Function $fn, NodeList $args);
+    case countAll;
+    case excluded(Operand $column);
+    // what `own` leaves behind and a cross join holds as its ON; never read or rendered
+    case hole;
+
+    /**
+     * Whether this expression aggregates rows. Subqueries aggregate on their own, so the walk
+     * stays out of them; raw SQL is not looked into.
+     */
+    internal const function aggregates() : bool
+    {
+        return match ($this) {
+            Node::countAll => true,
+            Node::call($fn, $args) => $fn->aggregate() || Node::any($args->items),
+            Node::unary($op, $x) => $x->node->aggregates(),
+            Node::binary($op, $xs) => $xs->left->aggregates() || $xs->right->aggregates(),
+            Node::isNull($negated, $x) => $x->node->aggregates(),
+            Node::inList($x, $items) => $x->node->aggregates() || Node::any($items->items),
+            Node::inQuery($x, $q) => $x->node->aggregates(),
+            Node::between($xs) => Node::any($xs->items),
+            Node::excluded($column) => $column->node->aggregates(),
+            else => false,
+        };
+    }
+
+    internal static function any(const array<Node>& $nodes) : bool
+    {
+        foreach ($nodes as const &$n) {
+            if ($n->aggregates()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The column this node names, or null when it is any other expression.
+     */
+    internal const function ident() : Ident?
+    {
+        return match ($this) {
+            Node::column($id) => {
+                Ident? $out = $id;
+                return $out;
+            },
+            else => null,
+        };
+    }
+}
+
+/**
+ * The one child of a node.
+ */
+internal class Operand
+{
+    internal const Node $node;
+}
+
+/**
+ * The two children of a binary node.
+ */
+internal class Operands
+{
+    internal const Node $left;
+    internal const Node $right;
+}
+
+/**
+ * The children of a node that takes any number of them.
+ */
+internal class NodeList
+{
+    internal const array<Node> $items;
+
+    // written out, or an array literal argument would try to fill a NodeList itself
+    internal constructor(array<Node> $items)
+    {
+        $this->items = mv $items;
+    }
+}
+
+// the builders below are the one place that knows how a node holds its children; operators and
+// functions go through them
+
+/**
+ * The node out of `$slot`, whose owner drops it next, leaving a placeholder that owns nothing.
+ * `mv` cannot move a field, so a term passed by value would otherwise copy its node.
+ */
+internal function own(Node& $slot) : Node
+{
+    return own($slot, Node::hole);
+}
+
+/**
+ * The value out of `$slot`, leaving `$empty` in its place.
+ */
+internal function own<T>(T& $slot, T $empty) : T
+{
+    ptr<T> $p = $slot:$;
+    T $out = mem::take<T>($p:$[0]);
+    mem::init<T>($p:$[0], mv $empty);
+    return $out;
+}
+
+internal function binary(Binary $op, Node $left, Node $right) : Node
+{
+    return .binary($op, Operands(mv $left, mv $right));
+}
+
+internal function unary(Unary $op, Node $x) : Node
+{
+    return .unary($op, Operand(mv $x));
+}
+
+internal function isNull(bool $negated, Node $x) : Node
+{
+    return .isNull($negated, Operand(mv $x));
+}
+
+internal function inList(Node $x, array<Node> $items) : Node
+{
+    return .inList(Operand(mv $x), NodeList(mv $items));
+}
+
+internal function inQuery(Node $x, rc<Select> $query) : Node
+{
+    return .inQuery(Operand(mv $x), mv $query);
+}
+
+internal function between(Node $x, Node $low, Node $high) : Node
+{
+    array<Node> $xs = arr::room<Node>(3);
+    $xs[] = mv $x;
+    $xs[] = mv $low;
+    $xs[] = mv $high;
+    return .between(NodeList(mv $xs));
+}
+
+internal function call(Function $fn, array<Node> $args) : Node
+{
+    return .call($fn, NodeList(mv $args));
+}
+
+internal function excluded(Node $x) : Node
+{
+    return .excluded(Operand(mv $x));
+}

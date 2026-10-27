@@ -1,0 +1,892 @@
+namespace hydrahon;
+
+/**
+ * Walks one statement into SQL text for dialect `D`, collecting parameters in placeholder order.
+ * A renderer lives for one `sql()` call. The first error sticks; rendering carries on so the
+ * code stays linear, and `finish()` reports it instead of the text.
+ */
+internal struct Renderer<D : Dialect>
+{
+    internal D $d;
+    internal str::text $out = str::text();
+    // moved into the `Sql` this hands back
+    internal Params $params = Params();
+    internal Error? $failed = null;
+    internal Spell $spell = Spell::qualified;
+    internal Target $focus = Target::none;
+    // whether `$focus` is anything but `none`, so the common case reads a flag instead of the enum
+    internal bool $focused = false;
+
+    internal constructor(const D& $dialect)
+    {
+        $this->d = $dialect;
+        // one block for most statements: the text grows from the first append's size otherwise
+        $this->out->reserve(512);
+    }
+
+    internal function finish() : result<Sql, Error>
+    {
+        if ($this->failed != null) {
+            Error $e = guard $this->failed;
+            return .error($e);
+        }
+        return .ok(Sql($this->out->take(), own($this->params, Params())));
+    }
+
+    internal function select(const Select& $s) : void
+    {
+        // a nested select always qualifies its own columns, so RETURNING-bare cannot leak in
+        if (!$this->focused && $this->spell == Spell::qualified) {
+            // nothing to save: the usual case, outside any INSERT
+            $this->clauses($s);
+            $this->spell = Spell::qualified;
+            return;
+        }
+        Spell $spell = $this->spell;
+        Target $focus = $this->focus;
+        $this->spell = Spell::qualified;
+        $this->aim(hide($s, $focus));
+        $this->clauses($s);
+        $this->spell = $spell;
+        $this->aim(mv $focus);
+    }
+
+    private function aim(Target $focus) : void
+    {
+        $this->focused = match ($focus) {
+            Target::none => false,
+            else => true,
+        };
+        $this->focus = mv $focus;
+    }
+
+    private function clauses(const Select& $s) : void
+    {
+        $this->ctes($s->ctes);
+        $this->out->append('SELECT ');
+        if ($s->unique) {
+            $this->out->append('DISTINCT ');
+        }
+        if ($s->fields->count() == 0) {
+            $this->out->push(42);
+        }
+        $this->fields($s->fields);
+        $from = $s->from;
+        if ($from != null) {
+            Table $t = guard $from;
+            $this->out->append(' FROM ');
+            $this->table($t, true);
+        }
+        $inner = $s->inner;
+        if ($inner != null) {
+            rc<Select> $q = guard $inner;
+            if ($q->value->stars() && $q->value->joins->count() > 0) {
+                $this->need(.starCount);
+            }
+            $this->out->append(' FROM (');
+            $this->select($q->value);
+            $this->out->append(') AS ');
+            $this->d->quote(Select::DERIVED, $this->out);
+        }
+        foreach ($s->joins as const &$j) {
+            $this->join($j);
+        }
+        $this->conditions(' WHERE ', $s->wheres);
+        if ($s->groups->count() > 0) {
+            $this->out->append(' GROUP BY ');
+            $this->list($s->groups);
+        }
+        $this->conditions(' HAVING ', $s->havings);
+        foreach ($s->branches as const &$b) {
+            $this->branch($b);
+        }
+        // a compound orders by its output columns, which carry no table
+        if ($s->branches->count() > 0) {
+            $this->spell = Spell::bare;
+        }
+        $this->orders($s->orders);
+        $this->limits($s->take, $s->skip);
+    }
+
+    internal function insert(const Insert& $i) : void
+    {
+        // every row and the upsert are checked before anything else can fail. A row setting the
+        // first row's columns in its order fits wherever the first row does, so only the others
+        // are checked themselves. The first row always fits.
+        bool $empty = true;
+        usize $r = 0;
+        while ($r < $i->rows->count()) {
+            const Values& $row = $i->rows[$r];
+            if ($r == 0 || !$row->fits) {
+                $this->check($row, $i->into);
+            }
+            if ($row->items->count() > 0) {
+                $empty = false;
+            }
+            $r = $r + 1;
+        }
+        $this->check($i->updates, $i->into);
+        if ($empty) {
+            $this->fail(.invalid(.noRows));
+            return;
+        }
+        $this->ctes($i->ctes, .insertWith);
+        UpsertStyle $style = $this->d->upsert();
+        bool $keyed = $style == UpsertStyle::duplicateKey;
+        $this->out->append('INSERT ');
+        if ($i->conflicts && $i->skip && $keyed) {
+            $this->out->append('IGNORE ');
+        }
+        $this->out->append('INTO ');
+        $this->table($i->into, false);
+        $this->out->append(' (');
+        const Values& $first = $i->rows[0];
+        usize $c = 0;
+        while ($c < $first->items->count()) {
+            if ($c > 0) {
+                $this->out->append(', ');
+            }
+            $this->target($first->items[$c]);
+            $c = $c + 1;
+        }
+        $this->out->append(') VALUES ');
+        $this->aim(.home($i->into->owner));
+        // one parameter per value is the usual case; an expression may bind more or none
+        usize $cells = $i->rows->count() * $first->items->count();
+        $this->params->items->reserve($this->params->items->count() + $cells);
+        $this->out->reserve($this->out->size() + 64 + $cells * 4);
+        $r = 0;
+        while ($r < $i->rows->count()) {
+            if ($r > 0) {
+                $this->out->append(', ');
+            }
+            $this->row($first, $i->rows[$r]);
+            $r = $r + 1;
+        }
+        if ($i->conflicts) {
+            $this->conflict($i, $keyed);
+        }
+        $this->returning($i->returns);
+        $this->aim(.none);
+    }
+
+    internal function update(const Update& $u) : void
+    {
+        $this->check($u->sets, $u->table);
+        if ($u->sets->items->count() == 0) {
+            $this->fail(.invalid(.noAssignments));
+            return;
+        }
+        $this->ctes($u->ctes, .updateWith);
+        $this->out->append('UPDATE ');
+        $this->table($u->table, true);
+        $this->out->append(' SET ');
+        $this->assignments($u->sets);
+        $this->conditions(' WHERE ', $u->wheres);
+        $this->bounds($u->orders, $u->take, .updateOrder, .updateLimit);
+        $this->returning($u->returns);
+    }
+
+    internal function delete(const Delete& $x) : void
+    {
+        $this->ctes($x->ctes, .deleteWith);
+        $this->out->append('DELETE FROM ');
+        $this->table($x->table, true);
+        $this->conditions(' WHERE ', $x->wheres);
+        $this->bounds($x->orders, $x->take, .deleteOrder, .deleteLimit);
+        $this->returning($x->returns);
+    }
+
+    internal function truncate(const Truncate& $t) : void
+    {
+        $this->d->truncate($this->out);
+        $this->table($t->table, false);
+    }
+
+    internal function drop(const Drop& $x) : void
+    {
+        $this->out->append('DROP TABLE ');
+        if ($x->guarded) {
+            $this->out->append('IF EXISTS ');
+        }
+        $this->table($x->table, false);
+    }
+
+    /**
+     * Render `$n`, in parentheses when it binds looser than `$min`. Every arm hands its parts
+     * to the method for that kind of node.
+     */
+    internal function node(const Node& $n, uint8 $min) : void
+    {
+        // leaves bind tighter than anything, so only composites look at `$min`
+        match ($n) {
+            Node::column($id) => { $this->column($id); },
+            Node::param($v) => { $this->bind($v); },
+            Node::star($q) => { $this->star($q); },
+            Node::exists($q) => { $this->exists($q); },
+            Node::scalar($q) => { $this->scalar($q); },
+            Node::countAll => { $this->out->append('COUNT(*)'); },
+            else => { $this->composite($n, $min); },
+        };
+    }
+
+    private function composite(const Node& $n, uint8 $min) : void
+    {
+        bool $open = precedence($n) < $min;
+        if ($open) {
+            $this->out->push(40);
+        }
+        match ($n) {
+            Node::raw($sql, $ps) => { $this->raw($sql, $ps); },
+            Node::unary($op, $x) => { $this->unary($op, $x->node); },
+            Node::binary($op, $xs) => { $this->binary($op, $xs->left, $xs->right); },
+            Node::isNull($negated, $x) => { $this->isNull($negated, $x->node); },
+            Node::inList($x, $items) => { $this->inList($x->node, $items->items); },
+            Node::inQuery($x, $q) => { $this->inQuery($x->node, $q); },
+            Node::between($xs) => { $this->between($xs->items[0], $xs->items[1], $xs->items[2]); },
+            Node::call($fn, $args) => { $this->call($fn, $args->items); },
+            Node::excluded($column) => { $this->excluded($column->node); },
+            else => {},
+        };
+        if ($open) {
+            $this->out->push(41);
+        }
+    }
+
+    private function star(string? $q) : void
+    {
+        if ($q != null && $this->spell != Spell::bare) {
+            string $name = guard $q;
+            $this->d->quote($name, $this->out);
+            $this->out->push(46);
+        }
+        $this->out->push(42);
+    }
+
+    private function unary(Unary $op, const Node& $x) : void
+    {
+        if ($op == Unary::not) {
+            $this->out->append('NOT ');
+            $this->node($x, 5);
+        } else {
+            // a nested minus in parentheses, `--` would open a comment
+            $this->out->push(45);
+            $this->node($x, 8);
+        }
+    }
+
+    private function binary(Binary $op, const Node& $left, const Node& $right) : void
+    {
+        uint8 $p = $op->precedence();
+        uint8 $leftMin = $p;
+        if ($p == 4) {
+            // comparisons do not chain
+            $leftMin = 5;
+        }
+        $this->node($left, $leftMin);
+        $this->d->symbol($op, $this->out);
+        $this->node($right, $p + 1);
+        if ($op == Binary::like) {
+            $this->escape();
+        }
+        if ($op->divides() && literalZero($right)) {
+            // the servers disagree: NULL on MySQL and SQLite, an error on Postgres
+            $this->fail(.invalid(.divisionByZero));
+        }
+    }
+
+    private function isNull(bool $negated, const Node& $x) : void
+    {
+        $this->node($x, 5);
+        if ($negated) {
+            $this->out->append(' IS NOT NULL');
+        } else {
+            $this->out->append(' IS NULL');
+        }
+    }
+
+    private function inList(const Node& $x, const array<Node>& $items) : void
+    {
+        if ($items->count() == 0) {
+            // nothing is in an empty list
+            $this->out->append('1 = 0');
+            return;
+        }
+        $this->node($x, 5);
+        $this->out->append(' IN (');
+        $this->params->items->reserve($this->params->items->count() + $items->count());
+        $this->list($items);
+        $this->out->push(41);
+    }
+
+    private function inQuery(const Node& $x, const rc<Select>& $q) : void
+    {
+        $this->node($x, 5);
+        $this->out->append(' IN (');
+        $this->select($q->value);
+        $this->out->push(41);
+    }
+
+    private function between(const Node& $x, const Node& $low, const Node& $high) : void
+    {
+        $this->node($x, 5);
+        $this->out->append(' BETWEEN ');
+        $this->node($low, 5);
+        $this->out->append(' AND ');
+        $this->node($high, 5);
+    }
+
+    private function exists(const rc<Select>& $q) : void
+    {
+        $this->out->append('EXISTS (');
+        $this->select($q->value);
+        $this->out->push(41);
+    }
+
+    private function scalar(const rc<Select>& $q) : void
+    {
+        $this->out->push(40);
+        $this->select($q->value);
+        $this->out->push(41);
+    }
+
+    private function call(Function $fn, const array<Node>& $args) : void
+    {
+        $this->d->call($fn, $this->out);
+        if ($fn == Function::now) {
+            return;
+        }
+        $this->out->push(40);
+        if ($fn == Function::countDistinct) {
+            $this->out->append('DISTINCT ');
+        }
+        $this->list($args);
+        $this->out->push(41);
+    }
+
+    private function excluded(const Node& $column) : void
+    {
+        Ident? $id = $column->ident();
+        if ($id == null) {
+            $this->fail(.invalid(.notAColumn));
+            return;
+        }
+        Ident $col = guard $id;
+        match ($this->focus) {
+            Target::home($t) => {
+                if (!$col->of($t)) {
+                    $this->fail(.invalid(.foreignColumn));
+                }
+            },
+            else => {
+                $this->fail(.invalid(.notAColumn));
+                return;
+            },
+        };
+        $this->d->excluded($col->name(), $this->out);
+    }
+
+    private function fail(Error $e) : void
+    {
+        if ($this->failed == null) {
+            Error? $first = $e;
+            $this->failed = $first;
+        }
+    }
+
+    private function need(Feature $f) : void
+    {
+        if (!$this->d->supports($f)) {
+            $this->fail(.unsupported($f));
+        }
+    }
+
+    /**
+     * The column `$n` names, which has to be one of `$home`'s. Anything else fails the render
+     * and answers null.
+     */
+    private function target(const Node& $n, const Table& $home) : Ident?
+    {
+        Ident $id = guard $n->ident() else {
+            $this->fail(.invalid(.notAColumn));
+            return null;
+        }
+        if (!$id->of($home)) {
+            $this->fail(.invalid(.foreignColumn));
+            return null;
+        }
+        Ident? $out = mv $id;
+        return $out;
+    }
+
+    /**
+     * Write the name of the column a checked `Values` entry sets.
+     */
+    private function target(const Pair& $p) : void
+    {
+        if ($p->named) {
+            $this->d->quote($p->column->name(), $this->out);
+        }
+    }
+
+    /**
+     * Fail the render if `$values` does not fit `$home` (`Values::problem`).
+     */
+    private function check(const Values& $values, const Table& $home) : void
+    {
+        Problem? $p = $values->problem($home);
+        if ($p != null) {
+            Problem $which = guard $p;
+            $this->fail(.invalid($which));
+        }
+    }
+
+    private function bind(const Value& $v) : void
+    {
+        $this->params->items[] = $v;
+        $this->d->placeholder($this->params->items->count(), $this->out);
+    }
+
+    private function column(const Ident& $id) : void
+    {
+        if (!$this->focused) {
+            if ($this->spell == Spell::qualified) {
+                $this->d->quote($id->owner->qualifier, $this->out);
+                $this->out->push(46);
+            }
+            $this->d->quote($id->name(), $this->out);
+            return;
+        }
+        match ($this->focus) {
+            Target::lost($owner) => {
+                if ($id->through($owner)) {
+                    $this->fail(.invalid(.hiddenTarget));
+                }
+            },
+            else => {},
+        };
+        if ($this->spell == Spell::bare) {
+            $this->d->quote($id->name(), $this->out);
+            return;
+        }
+        match ($this->focus) {
+            Target::home($owner) => {
+                if ($id->through($owner)) {
+                    $this->relation($owner);
+                    $this->out->push(46);
+                    $this->d->quote($id->name(), $this->out);
+                    return;
+                }
+            },
+            else => {},
+        };
+        $this->d->quote($id->owner->qualifier, $this->out);
+        $this->out->push(46);
+        $this->d->quote($id->name(), $this->out);
+    }
+
+    /**
+     * The schema-qualified table name, with no alias: how INSERT names its target, and how that
+     * target's columns are written while `$focus` is `home`.
+     */
+    private function relation(const Owner& $owner) : void
+    {
+        $schema = $owner->schema;
+        if ($schema != null && !$owner->cte) {
+            string $s = guard $schema;
+            $this->d->quote($s, $this->out);
+            $this->out->push(46);
+        }
+        $this->d->quote($owner->table, $this->out);
+    }
+
+    private function table(const Table& $t, bool $aliased) : void
+    {
+        $this->relation($t->owner);
+        if ($aliased && $t->owner->aliased) {
+            $this->out->append(' AS ');
+            $this->d->quote($t->owner->qualifier, $this->out);
+        }
+    }
+
+    /**
+     * Copy raw SQL, binding each `?` in code to the next parameter. Quoted spans and comments,
+     * as the dialect's syntax reads them, go through as written.
+     */
+    private function raw(const string& $sql, const array<Value>& $ps) : void
+    {
+        Syntax $syntax = $this->d->syntax();
+        $this->params->items->reserve($this->params->items->count() + $ps->count());
+        ptr<const uint8> $bytes = $sql->data();
+        usize $next = 0;
+        usize $i = 0;
+        // everything before `$copied` is written; the rest goes out in runs, at each `?` and at
+        // the end
+        usize $copied = 0;
+        while ($i < $sql->size()) {
+            usize $end = $syntax->span($sql, $i);
+            if ($end > $i) {
+                $i = $end;
+                continue;
+            }
+            if ($bytes:$[$i] == 63) {
+                if ($i > $copied) {
+                    $this->out->append($bytes:$ + $copied, $i - $copied);
+                }
+                if ($next < $ps->count()) {
+                    $this->bind($ps[$next]);
+                } else {
+                    $this->fail(.invalid(.rawParams));
+                }
+                $next = $next + 1;
+                $copied = $i + 1;
+            }
+            $i = $i + 1;
+        }
+        if ($sql->size() > $copied) {
+            $this->out->append($bytes:$ + $copied, $sql->size() - $copied);
+        }
+        if ($next != $ps->count()) {
+            $this->fail(.invalid(.rawParams));
+        }
+    }
+
+    private function list(const array<Node>& $nodes) : void
+    {
+        usize $i = 0;
+        while ($i < $nodes->count()) {
+            if ($i > 0) {
+                $this->out->append(', ');
+            }
+            $this->node($nodes[$i], 0);
+            $i = $i + 1;
+        }
+    }
+
+    private function fields(const array<Field>& $fields) : void
+    {
+        usize $i = 0;
+        while ($i < $fields->count()) {
+            if ($i > 0) {
+                $this->out->append(', ');
+            }
+            $this->node($fields[$i]->node, 0);
+            $alias = $fields[$i]->alias;
+            if ($alias != null) {
+                string $a = guard $alias;
+                $this->out->append(' AS ');
+                $this->d->quote($a, $this->out);
+            }
+            $i = $i + 1;
+        }
+    }
+
+    private function conditions(const string& $keyword, const array<Node>& $parts) : void
+    {
+        if ($parts->count() == 0) {
+            return;
+        }
+        $this->out->append($keyword);
+        uint8 $min = 0;
+        if ($parts->count() > 1) {
+            $min = 2;
+        }
+        usize $i = 0;
+        while ($i < $parts->count()) {
+            if ($i > 0) {
+                $this->out->append(' AND ');
+            }
+            $this->node($parts[$i], $min);
+            $i = $i + 1;
+        }
+    }
+
+    private function orders(const array<Order>& $orders) : void
+    {
+        if ($orders->count() == 0) {
+            return;
+        }
+        $this->out->append(' ORDER BY ');
+        usize $i = 0;
+        while ($i < $orders->count()) {
+            if ($i > 0) {
+                $this->out->append(', ');
+            }
+            $this->node($orders[$i]->node, 0);
+            if ($orders[$i]->direction == Direction::desc) {
+                $this->out->append(' DESC');
+            } else {
+                $this->out->append(' ASC');
+            }
+            $i = $i + 1;
+        }
+    }
+
+    /**
+     * ORDER BY and LIMIT on an UPDATE or DELETE, which need `$order` and `$limit` of the dialect.
+     */
+    private function bounds(const array<Order>& $orders, uint64? $take, Feature $order, Feature $limit) : void
+    {
+        if ($orders->count() > 0) {
+            $this->need($order);
+        }
+        $this->orders($orders);
+        if ($take != null) {
+            $this->need($limit);
+        }
+        $this->limits($take, null);
+    }
+
+    private function limits(uint64? $take, uint64? $skip) : void
+    {
+        if ($take != null) {
+            $this->out->append(' LIMIT ');
+            uint64 $takeRows = guard $take;
+            $this->count($takeRows);
+        }
+        if ($skip != null) {
+            if ($take == null) {
+                $this->d->unlimited($this->out);
+            }
+            $this->out->append(' OFFSET ');
+            uint64 $skipRows = guard $skip;
+            $this->count($skipRows);
+        }
+    }
+
+    /**
+     * Append a row count for LIMIT or OFFSET. Postgres and SQLite take a signed 64-bit count, so
+     * a larger one is cut to the largest of those, which is past every row all the same.
+     */
+    private function count(uint64 $rows) : void
+    {
+        uint64 $n = $rows;
+        if ($n > 9223372036854775807) {
+            $n = 9223372036854775807;
+        }
+        digits($n, $this->out);
+    }
+
+    /**
+     * Append what makes a backslash the escape character of the LIKE pattern just written,
+     * where the dialect does not already treat it so.
+     */
+    private function escape() : void
+    {
+        Syntax $syntax = $this->d->syntax();
+        if ($syntax->likeEscape) {
+            return;
+        }
+        if ($syntax->backslashes) {
+            $this->out->append(' ESCAPE \'\\\\\'');
+        } else {
+            $this->out->append(' ESCAPE \'\\\'');
+        }
+    }
+
+    private function join(const Join& $j) : void
+    {
+        match ($j->kind) {
+            JoinKind::inner => { $this->out->append(' INNER JOIN '); },
+            JoinKind::left => { $this->out->append(' LEFT JOIN '); },
+            JoinKind::right => {
+                $this->need(.rightJoin);
+                $this->out->append(' RIGHT JOIN ');
+            },
+            JoinKind::full => {
+                $this->need(.fullJoin);
+                $this->out->append(' FULL OUTER JOIN ');
+            },
+            JoinKind::cross => { $this->out->append(' CROSS JOIN '); },
+        };
+        $this->table($j->table, true);
+        if ($j->kind != JoinKind::cross) {
+            $this->out->append(' ON ');
+            $this->node($j->on, 0);
+        }
+    }
+
+    private function branch(const Branch& $b) : void
+    {
+        if ($b->kind == Compound::unionAll) {
+            $this->out->append(' UNION ALL ');
+        } else {
+            $this->out->append(' UNION ');
+        }
+        const Select& $q = $b->query->value;
+        bool $nested = $q->orders->count() > 0 || $q->take != null || $q->skip != null || $q->branches->count() > 0 || $q->ctes->count() > 0;
+        if (!$nested) {
+            $this->select($q);
+            return;
+        }
+        $this->need(.compoundOrder);
+        $this->out->push(40);
+        $this->select($q);
+        $this->out->push(41);
+    }
+
+    /**
+     * A WITH on a write statement, which needs `$with` of the dialect.
+     */
+    private function ctes(const array<Cte>& $ctes, Feature $with) : void
+    {
+        if ($ctes->count() > 0) {
+            $this->need($with);
+        }
+        $this->ctes($ctes);
+    }
+
+    private function ctes(const array<Cte>& $ctes) : void
+    {
+        if ($ctes->count() == 0) {
+            return;
+        }
+        $this->out->append('WITH ');
+        foreach ($ctes as const &$c) {
+            if ($c->recursive) {
+                $this->out->append('RECURSIVE ');
+                break;
+            }
+        }
+        usize $i = 0;
+        while ($i < $ctes->count()) {
+            if ($i > 0) {
+                $this->out->append(', ');
+            }
+            $this->d->quote($ctes[$i]->name, $this->out);
+            $this->out->append(' AS (');
+            $this->select($ctes[$i]->query->value);
+            $this->out->push(41);
+            $i = $i + 1;
+        }
+        $this->out->push(32);
+    }
+
+    private function assignments(const Values& $values) : void
+    {
+        usize $i = 0;
+        while ($i < $values->items->count()) {
+            if ($i > 0) {
+                $this->out->append(', ');
+            }
+            $this->target($values->items[$i]);
+            $this->out->append(' = ');
+            $this->node($values->items[$i]->value, 0);
+            $i = $i + 1;
+        }
+    }
+
+    /**
+     * One VALUES tuple, in the column order of the first row. A row that `fits` is in that order
+     * already.
+     */
+    private function row(const Values& $first, const Values& $row) : void
+    {
+        usize $n = $first->items->count();
+        if ($row->items->count() != $n) {
+            $this->fail(.invalid(.rowShape));
+            return;
+        }
+        $this->out->push(40);
+        if ($row->fits) {
+            const array<Pair>& $items = $row->items;
+            usize $k = 0;
+            while ($k < $n) {
+                if ($k > 0) {
+                    $this->out->append(', ');
+                }
+                // most values are plain parameters, which need nothing of node()
+                match ($items[$k]->value) {
+                    Node::param($v) => { $this->bind($v); },
+                    else => { $this->node($items[$k]->value, 0); },
+                };
+                $k = $k + 1;
+            }
+            $this->out->push(41);
+            return;
+        }
+        usize $c = 0;
+        while ($c < $n) {
+            if ($c > 0) {
+                $this->out->append(', ');
+            }
+            const Pair& $want = $first->items[$c];
+            if ($row->items[$c]->sameColumn($want)) {
+                $this->node($row->items[$c]->value, 0);
+            } else {
+                bool $found = false;
+                foreach ($row->items as const &$p) {
+                    if ($p->sameColumn($want)) {
+                        $this->node($p->value, 0);
+                        $found = true;
+                        break;
+                    }
+                }
+                if (!$found) {
+                    $this->fail(.invalid(.rowShape));
+                }
+            }
+            $c = $c + 1;
+        }
+        $this->out->push(41);
+    }
+
+    private function conflict(const Insert& $i, bool $keyed) : void
+    {
+        $this->need(.upsert);
+        bool $updating = $i->updates->items->count() > 0;
+        if ($updating == $i->skip) {
+            // either both or neither of update and ignore
+            $this->fail(.invalid(.conflictAction));
+            return;
+        }
+        if ($keyed) {
+            if ($updating) {
+                $this->d->incoming($this->out);
+                $this->out->append(' ON DUPLICATE KEY UPDATE ');
+                $this->assignments($i->updates);
+            }
+            return;
+        }
+        $this->out->append(' ON CONFLICT');
+        if ($i->targets->count() > 0) {
+            $this->out->append(' (');
+            usize $t = 0;
+            while ($t < $i->targets->count()) {
+                if ($t > 0) {
+                    $this->out->append(', ');
+                }
+                Ident? $id = $this->target($i->targets[$t], $i->into);
+                if ($id != null) {
+                    Ident $col = guard $id;
+                    $this->d->quote($col->name(), $this->out);
+                }
+                $t = $t + 1;
+            }
+            $this->out->push(41);
+        }
+        if ($i->skip) {
+            $this->out->append(' DO NOTHING');
+            return;
+        }
+        if ($i->targets->count() == 0) {
+            $this->fail(.invalid(.conflictTarget));
+        }
+        $this->out->append(' DO UPDATE SET ');
+        $this->assignments($i->updates);
+    }
+
+    private function returning(const array<Field>& $fields) : void
+    {
+        if ($fields->count() == 0) {
+            return;
+        }
+        $this->need(.returning);
+        $this->out->append(' RETURNING ');
+        Spell $spell = $this->spell;
+        $this->spell = Spell::bare;
+        $this->fields($fields);
+        $this->spell = $spell;
+    }
+}
+

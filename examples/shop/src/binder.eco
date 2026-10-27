@@ -1,0 +1,126 @@
+namespace shop;
+
+/**
+ * Hands hydrahon's parameters to libmysql, in placeholder order.
+ */
+public struct MysqlBinder : hydrahon::Binder
+{
+    public mysql::Params $params = mysql::Params();
+
+    public function none() : void
+    {
+        $this->params[] = mysql::Value::none();
+    }
+
+    public function bool(bool $v) : void
+    {
+        int64 $bit = 0;
+        if ($v) {
+            $bit = 1;
+        }
+        $this->params[] = mysql::Value::int($bit);
+    }
+
+    public function int(int64 $v) : void
+    {
+        $this->params[] = mysql::Value::int($v);
+    }
+
+    public function uint(uint64 $v) : void
+    {
+        $this->params[] = mysql::Value::uint($v);
+    }
+
+    public function float(float64 $v) : void
+    {
+        $this->params[] = mysql::Value::float($v);
+    }
+
+    public function decimal(const hydrahon::Decimal& $v) : void
+    {
+        $this->params[] = mysql::Value::decimal($v->text);
+    }
+
+    public function text(const string& $v) : void
+    {
+        $this->params[] = mysql::Value::text($v);
+    }
+
+    public function bytes(const hydrahon::Bytes& $v) : void
+    {
+        $this->params[] = mysql::Value::bytes($v->data);
+    }
+
+    public function date(const hydrahon::Date& $v) : void
+    {
+        $this->params[] = mysql::Value::date(mysql::Date($v->year, $v->month, $v->day));
+    }
+
+    public function datetime(const hydrahon::DateTime& $v) : void
+    {
+        $this->params[] = mysql::Value::datetime(mysql::DateTime($v->year, $v->month, $v->day, $v->hour, $v->minute, $v->second, $v->micro));
+    }
+
+    public function time(const hydrahon::Time& $v) : void
+    {
+        $this->params[] = mysql::Value::time(mysql::Time($v->negative, $v->hours, $v->minute, $v->second, $v->micro));
+    }
+}
+
+/**
+ * Why a statement did not run: hydrahon refused to render it, or MySQL refused to run it.
+ */
+public enum Failure
+{
+    case render(hydrahon::Error $e);
+    case db(mysql::Error $e);
+}
+
+namespace str;
+
+public function from(const shop::Failure& $f) : string
+{
+    match ($f) {
+        shop::Failure::render($e) => {
+            return str::from($e);
+        },
+        shop::Failure::db($e) => {
+            return str::from($e);
+        },
+    };
+    return '';
+}
+
+namespace shop;
+
+/**
+ * Render `$statement` for MySQL and run it for its rows.
+ */
+public function query<S>(mysql::Connection $db, const S& $statement) : result<mysql::ResultSet, Failure>
+{
+    hydrahon::Sql $sql = guard $statement->sql<hydrahon::Mysql>() else ($e) {
+        return .error(.render($e));
+    }
+    MysqlBinder $b = MysqlBinder();
+    $sql->bind($b);
+    mysql::ResultSet $rs = guard $db->query($sql->text, $b->params) else ($e) {
+        return .error(.db($e));
+    }
+    return .ok($rs);
+}
+
+/**
+ * Render `$statement` for MySQL and run it for its outcome.
+ */
+public function exec<S>(mysql::Connection $db, const S& $statement) : result<mysql::Outcome, Failure>
+{
+    hydrahon::Sql $sql = guard $statement->sql<hydrahon::Mysql>() else ($e) {
+        return .error(.render($e));
+    }
+    MysqlBinder $b = MysqlBinder();
+    $sql->bind($b);
+    mysql::Outcome $out = guard $db->exec($sql->text, $b->params) else ($e) {
+        return .error(.db($e));
+    }
+    return .ok($out);
+}

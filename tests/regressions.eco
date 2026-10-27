@@ -1,0 +1,184 @@
+// each test pins one of PHP Hydrahon's pitfalls, so the successor never grows it back
+
+use hydrahon::{Select, Delete, Insert, Update, Mysql, Postgres, Sqlite, Term};
+use hydrahon::fn;
+
+test empty_in_never_widens_a_delete
+{
+    // Hydrahon dropped `whereIn('id', [])`, so the delete hit every row
+    $u = UserTable();
+    array<int64> $none = [];
+    assert(text<Mysql, Delete>(Delete(from: $u)->where($u->id in $none)) == 'DELETE FROM `users` WHERE 1 = 0');
+}
+
+test limit_zero_is_kept
+{
+    // Hydrahon treated limit(0) as no limit
+    $u = UserTable();
+    assert(text<Postgres, Select>(Select(from: $u)->limit(0)) == 'SELECT * FROM "users" LIMIT 0');
+}
+
+test count_leaves_the_query_alone
+{
+    // Hydrahon's count() reset the fields and the limit of the query it ran on
+    $u = UserTable();
+    $q = Select(from: $u)->fields([$u->name])->limit(5);
+    $before = text<Mysql, Select>($q);
+    $c = $q->count();
+    assert(text<Mysql, Select>($q) == $before);
+    assert(text<Mysql, Select>($c) == 'SELECT COUNT(*) AS `count` FROM (SELECT 1 FROM `users` LIMIT 5) AS `_h`');
+}
+
+test branching_copies
+{
+    // Hydrahon mutated one shared query object
+    $u = UserTable();
+    $base = Select(from: $u)->where($u->active);
+    $page = $base;
+    $page->limit(10);
+    assert(text<Mysql, Select>($base) == 'SELECT * FROM `users` WHERE `users`.`active`');
+    assert(text<Mysql, Select>($page) == 'SELECT * FROM `users` WHERE `users`.`active` LIMIT 10');
+}
+
+test null_value_sets_null
+{
+    // Hydrahon could not set a column to NULL through set('col', null)
+    $u = UserTable();
+    $s = render<Mysql, Update>(Update($u)->set([$u->email => null])->where($u->id == 1));
+    assert($s->text == 'UPDATE `users` SET `email` = ? WHERE `users`.`id` = ?');
+    assert(kinds($s) == 'NI');
+}
+
+test null_comparison_matches
+{
+    // Hydrahon rendered where('a', null) as `a = NULL`, which never matches
+    $u = UserTable();
+    string? $nobody = null;
+    assert(text<Mysql, Select>(Select(from: $u)->where($u->email == $nobody)) == 'SELECT * FROM `users` WHERE `users`.`email` IS NULL');
+}
+
+test rows_never_misalign
+{
+    // Hydrahon took the column list from row one and silently misaligned the rest
+    $u = UserTable();
+    $q = Insert(into: $u)->row([$u->name => 'a', $u->email => 'x'])->row([$u->email => 'y', $u->name => 'b']);
+    assert(kinds(render<Mysql, Insert>($q)) == ':a:x:b:y');
+}
+
+test join_on_keeps_precedence
+{
+    // Hydrahon glued join wheres to the on clause without parentheses
+    $u = UserTable();
+    $p = PostTable(alias: 'p');
+    Term<bool> $on = $p->userId == $u->id && ($p->id > 1 || $p->title like 'a%');
+    $q = Select(from: $u)->join(left: $p, on: $on);
+    assert(text<Mysql, Select>($q) == 'SELECT * FROM `users` LEFT JOIN `blog`.`posts` AS `p` ON `p`.`user_id` = `users`.`id` AND (`p`.`id` > ? OR `p`.`title` LIKE ?)');
+}
+
+test identifiers_are_never_parsed
+{
+    // Hydrahon split every dot and parsed ' as ', so names with either broke
+    $t = hydrahon::Table(name: 'odd.name as x');
+    Term<int64> $c = $t->column<int64>('a.b');
+    $q = Select(from: $t)->fields([$c]);
+    assert(text<Mysql, Select>($q) == 'SELECT `odd.name as x`.`a.b` FROM `odd.name as x`');
+}
+
+test raw_stays_parenthesized
+{
+    // a raw fragment with OR inside can't leak into the surrounding AND
+    $u = UserTable();
+    Term<bool> $r = hydrahon::raw<bool>('a = 1 OR b = 2', []);
+    $q = Select(from: $u)->where($u->active)->where($r);
+    assert(text<Mysql, Select>($q) == 'SELECT * FROM `users` WHERE `users`.`active` AND (a = 1 OR b = 2)');
+}
+
+test unsupported_is_an_error_not_a_drop
+{
+    // Hydrahon emitted MySQL-only clauses everywhere
+    $u = UserTable();
+    $q = Delete(from: $u)->where($u->id == 1)->limit(1);
+    assert(fails<Postgres, Delete>($q) == 'unsupported by this dialect: DELETE with LIMIT');
+    assert(fails<Sqlite, Delete>($q) == 'unsupported by this dialect: DELETE with LIMIT');
+}
+
+// found while widening the coverage
+
+test returning_subquery_keeps_its_qualifiers
+{
+    // RETURNING writes bare columns, and a subquery in it went bare too: `p.user_id = users.id`
+    // became `user_id = id`, which compares the post with itself (a compound ORDER BY had the
+    // same leak)
+    $u = UserTable();
+    $p = PostTable(alias: 'p');
+    $n = Select(from: $p)->fields([fn::count()])->where($p->userId == $u->id);
+    Term<int64> $posts = $n->scalar<int64>();
+    $q = Update($u)->set([$u->views => 0])->returning([$u->id, $posts->named('posts')]);
+    assert(text<Postgres, Update>($q) == 'UPDATE "users" SET "views" = $1 RETURNING "id", (SELECT COUNT(*) FROM "blog"."posts" AS "p" WHERE "p"."user_id" = "users"."id") AS "posts"');
+}
+
+test upsert_subquery_keeps_its_alias
+{
+    // an insert names its target by the table, and every column of that table was renamed to
+    // it, including those of another alias inside a subquery
+    $x = UserTable(alias: 'x');
+    $o = UserTable(alias: 'o');
+    $best = Select(from: $o)->fields([fn::max($o->views)])->where($o->age == $x->age);
+    Term<int64?> $top = $best->scalar<int64?>();
+    $q = Insert(into: $x)->row([$x->email => 'e'])->conflict([$x->email])->update([$x->views => fn::coalesce($top, 0)]);
+    assert(text<Postgres, Insert>($q) == 'INSERT INTO "users" ("email") VALUES ($1) ON CONFLICT ("email") DO UPDATE SET "views" = COALESCE((SELECT MAX("o"."views") FROM "users" AS "o" WHERE "o"."age" = "users"."age"), $2)');
+    // a subquery reading the target's own alias means its own rows
+    $mine = Select(from: $x)->fields([fn::max($x->views)]);
+    Term<int64?> $max = $mine->scalar<int64?>();
+    $r = Insert(into: $x)->row([$x->email => 'e'])->conflict([$x->email])->update([$x->views => fn::coalesce($max, $x->views)]);
+    assert(text<Postgres, Insert>($r) == 'INSERT INTO "users" ("email") VALUES ($1) ON CONFLICT ("email") DO UPDATE SET "views" = COALESCE((SELECT MAX("x"."views") FROM "users" AS "x"), "users"."views")');
+}
+
+test count_of_aggregates_is_one_row
+{
+    // `SELECT MAX(age)` is one row, but count() replaced the field and counted every row
+    $u = UserTable();
+    $q = Select(from: $u)->fields([fn::max($u->age)]);
+    assert(text<Mysql, Select>($q->count()) == 'SELECT COUNT(*) AS `count` FROM (SELECT MAX(`users`.`age`) FROM `users`) AS `_h`');
+    $nested = Select(from: $u)->fields([fn::coalesce(fn::sum($u->age), 0) + 1]);
+    assert(text<Mysql, Select>($nested->count()) == 'SELECT COUNT(*) AS `count` FROM (SELECT COALESCE(SUM(`users`.`age`), ?) + ? FROM `users`) AS `_h`');
+    // an aggregate inside a subquery field is that subquery's business
+    $p = PostTable(alias: 'p');
+    Term<int64> $posts = Select(from: $p)->fields([fn::count()])->where($p->userId == $u->id)->scalar<int64>();
+    $per = Select(from: $u)->fields([$u->id, $posts]);
+    assert(text<Mysql, Select>($per->count()) == 'SELECT COUNT(*) AS `count` FROM `users`');
+}
+
+test count_of_having_counts_groups
+{
+    // HAVING without GROUP BY filters the single aggregate row; counting it as rows was wrong
+    $u = UserTable();
+    $q = Select(from: $u)->fields([fn::count()])->having(fn::count() > 2);
+    assert(text<Postgres, Select>($q->count()) == 'SELECT COUNT(*) AS "count" FROM (SELECT COUNT(*) FROM "users" HAVING COUNT(*) > $1) AS "_h"');
+}
+
+test count_over_join_names_no_columns
+{
+    // `SELECT *` over a join repeats column names, which MySQL refuses in a derived table
+    $u = UserTable();
+    $p = PostTable(alias: 'p');
+    $q = Select(from: $u)->join(inner: $p, on: $p->userId == $u->id)->limit(10);
+    assert(text<Mysql, Select>($q->count()) == 'SELECT COUNT(*) AS `count` FROM (SELECT 1 FROM `users` INNER JOIN `blog`.`posts` AS `p` ON `p`.`user_id` = `users`.`id` LIMIT 10) AS `_h`');
+}
+
+test with_before_insert_is_refused_on_mysql
+{
+    // MySQL and MariaDB only take WITH inside INSERT ... SELECT, so the statement never parsed
+    $u = UserTable();
+    $q = Insert(into: $u)->row([$u->name => 'a'])->with(name: 'c', Select(from: $u));
+    assert(fails<Mysql, Insert>($q) == 'unsupported by this dialect: WITH before INSERT');
+}
+
+test page_never_wraps
+{
+    // the offset of a page far past the end wrapped around to a small number, and past the
+    // largest int64 Postgres and SQLite refuse it
+    $u = UserTable();
+    assert(text<Postgres, Select>(Select(from: $u)->page(4611686018427387904, 8)) == 'SELECT * FROM "users" LIMIT 8 OFFSET 9223372036854775807');
+    assert(text<Postgres, Select>(Select(from: $u)->page(1152921504606846975, 8)) == 'SELECT * FROM "users" LIMIT 8 OFFSET 9223372036854775800');
+}

@@ -1,0 +1,124 @@
+// the typed function catalog: each declaration pins the result type the compiler infers
+
+use hydrahon::{Select, Term, Decimal, Bytes, Date, DateTime, Time, Mysql, Postgres, Sqlite};
+use hydrahon::fn;
+
+test counts
+{
+    $k = KindTable();
+    Term<int64> $all = fn::count();
+    Term<int64> $some = fn::count($k->ns);
+    Term<int64> $distinct = fn::countDistinct($k->day);
+    assert(field($all) == 'COUNT(*)');
+    assert(field($some) == 'COUNT("k"."ns")');
+    assert(field($distinct) == 'COUNT(DISTINCT "k"."day")');
+    assert(field(fn::count($k->i + 1)) == 'COUNT("k"."i" + $1)');
+}
+
+test sums_and_means
+{
+    $k = KindTable();
+    Term<int64?> $a = fn::sum($k->i);
+    Term<int64?> $b = fn::sum($k->ni);
+    Term<uint64?> $c = fn::sum($k->u);
+    Term<float64?> $d = fn::sum($k->nf);
+    Term<Decimal?> $e = fn::sum($k->d);
+    Term<float64?> $f = fn::avg($k->i);
+    Term<float64?> $g = fn::avg($k->nu);
+    Term<float64?> $h = fn::avg($k->f);
+    Term<Decimal?> $m = fn::avg($k->nd);
+    assert(field($a) == 'SUM("k"."i")');
+    assert(field($b) == 'SUM("k"."ni")');
+    assert(field($c) == 'SUM("k"."u")');
+    assert(field($d) == 'SUM("k"."nf")');
+    assert(field($e) == 'SUM("k"."d")');
+    assert(field($f) == 'AVG("k"."i")');
+    assert(field($g) == 'AVG("k"."nu")');
+    assert(field($h) == 'AVG("k"."f")');
+    assert(field($m) == 'AVG("k"."nd")');
+}
+
+test absolute
+{
+    $k = KindTable();
+    Term<int64> $a = fn::abs($k->i);
+    Term<int64?> $b = fn::abs($k->ni);
+    Term<float64> $c = fn::abs($k->f);
+    Term<Decimal?> $d = fn::abs($k->nd);
+    assert(field($a) == 'ABS("k"."i")');
+    assert(field($b) == 'ABS("k"."ni")');
+    assert(field($c) == 'ABS("k"."f")');
+    assert(field($d) == 'ABS("k"."nd")');
+}
+
+test extremes
+{
+    $k = KindTable();
+    Term<int64?> $a = fn::min($k->i);
+    Term<uint64?> $b = fn::max($k->nu);
+    Term<string?> $c = fn::min($k->s);
+    Term<Date?> $e = fn::min($k->nday);
+    Term<DateTime?> $f = fn::max($k->at);
+    Term<Time?> $g = fn::min($k->time);
+    Term<Decimal?> $h = fn::max($k->d);
+    Term<float64?> $m = fn::min($k->nf);
+    assert(field($a) == 'MIN("k"."i")');
+    assert(field($b) == 'MAX("k"."nu")');
+    assert(field($c) == 'MIN("k"."s")');
+    assert(field($e) == 'MIN("k"."nday")');
+    assert(field($f) == 'MAX("k"."at")');
+    assert(field($g) == 'MIN("k"."time")');
+    assert(field($h) == 'MAX("k"."d")');
+    assert(field($m) == 'MIN("k"."nf")');
+}
+
+test text_functions
+{
+    $k = KindTable();
+    Term<string> $a = fn::lower($k->s);
+    Term<string?> $b = fn::upper($k->ns);
+    Term<int64> $c = fn::length($k->s);
+    Term<int64?> $d = fn::length($k->ns);
+    assert(field($a) == 'LOWER("k"."s")');
+    assert(field($b) == 'UPPER("k"."ns")');
+    assert(field($c) == 'CHAR_LENGTH("k"."s")');
+    assert(field($d) == 'CHAR_LENGTH("k"."ns")');
+    $q = Select(from: $k)->fields([$d]);
+    assert(text<Mysql, Select>($q) == 'SELECT CHAR_LENGTH(`k`.`ns`) FROM `k`');
+    assert(text<Sqlite, Select>($q) == 'SELECT LENGTH("k"."ns") FROM "k"');
+    assert(cond(fn::lower($k->s) like 'a%') == 'LOWER("k"."s") LIKE $1');
+}
+
+test coalesce_every_kind
+{
+    $k = KindTable();
+    Term<int64> $a = fn::coalesce($k->ni, 0);
+    Term<int64> $b = fn::coalesce($k->ni, $k->i);
+    Term<int64?> $c = fn::coalesce($k->ni, $k->ni);
+    assert(field($a) == 'COALESCE("k"."ni", $1)');
+    assert(field($b) == 'COALESCE("k"."ni", "k"."i")');
+    assert(field($c) == 'COALESCE("k"."ni", "k"."ni")');
+    Term<uint64> $u = fn::coalesce($k->nu, 1);
+    Term<float64> $f = fn::coalesce($k->nf, 0.5);
+    Term<Decimal> $d = fn::coalesce($k->nd, Decimal('0'));
+    Term<bool> $b2 = fn::coalesce($k->nb, false);
+    Term<string> $s = fn::coalesce($k->ns, $k->s);
+    Term<Bytes> $x = fn::coalesce($k->nx, Bytes(''));
+    Term<Date> $day = fn::coalesce($k->nday, $k->day);
+    Term<DateTime> $at = fn::coalesce($k->nat, fn::now());
+    Term<Time> $time = fn::coalesce($k->ntime, Time());
+    $q = Select(from: $k)->fields([$u, $f, $d, $b2, $s, $x, $day, $at, $time]);
+    $sql = render<Postgres, Select>($q);
+    assert($sql->text == 'SELECT COALESCE("k"."nu", $1), COALESCE("k"."nf", $2), COALESCE("k"."nd", $3), COALESCE("k"."nb", $4), COALESCE("k"."ns", "k"."s"), COALESCE("k"."nx", $5), COALESCE("k"."nday", "k"."day"), COALESCE("k"."nat", CURRENT_TIMESTAMP), COALESCE("k"."ntime", $6) FROM "k"');
+    assert(kinds($sql) == 'UFDBXT');
+}
+
+test aggregates_compose
+{
+    $k = KindTable();
+    $q = Select(from: $k)
+        ->fields([$k->s, fn::coalesce(fn::sum($k->ni), 0)->named('total')])
+        ->group([$k->s])
+        ->having(fn::count() > 1 && fn::max($k->at) > DateTime(2024, 1, 1));
+    assert(text<Postgres, Select>($q) == 'SELECT "k"."s", COALESCE(SUM("k"."ni"), $1) AS "total" FROM "k" GROUP BY "k"."s" HAVING COUNT(*) > $2 AND MAX("k"."at") > $3');
+}

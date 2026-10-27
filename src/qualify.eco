@@ -1,0 +1,84 @@
+namespace hydrahon;
+
+/**
+ * How a column name is spelled in the current clause.
+ */
+internal enum Spell
+{
+    // table.column, or the insert target's own name for its columns
+    case qualified;
+    // the column name alone: RETURNING lists and a compound ORDER BY
+    case bare;
+}
+
+/**
+ * The insert target, as a subquery sees it. `home` and `lost` cannot both be set: a subquery
+ * that reads the target under its table name hides those columns entirely.
+ */
+internal enum Target
+{
+    case none;
+    // columns of `$owner` are written with its table name, because INSERT names no alias
+    case home(Owner $owner);
+    // `$owner` is aliased, and a subquery reads that table under the bare name, so its columns
+    // cannot be written
+    case lost(Owner $owner);
+}
+
+/**
+ * The insert-target policy inside `$s`: a table going by the target's qualifier takes those
+ * columns over; the same table under its bare name leaves an aliased target nowhere to write.
+ */
+internal function hide(const Select& $s, Target $target) : Target
+{
+    return match ($target) {
+        Target::home($owner) => {
+            if (reads($s, $owner->qualifier, null)) {
+                return Target::none;
+            }
+            if (reads($s, $owner->table, $owner)) {
+                return Target::lost($owner);
+            }
+            return Target::home($owner);
+        },
+        Target::lost($owner) => Target::lost($owner),
+        Target::none => Target::none,
+    };
+}
+
+/**
+ * Whether `$s` reads a table, joined or derived, that qualifies its columns with `$name`. With
+ * `$same` set, a joined table counts only when it is that table itself; the derived table has
+ * no owner to compare.
+ */
+internal function reads(const Select& $s, const string& $name, Owner? $same) : bool
+{
+    $from = $s->from;
+    if ($from != null) {
+        Table $f = guard $from;
+        if (goesBy($f, $name, $same)) {
+            return true;
+        }
+    }
+    if ($s->inner != null && $name == Select::DERIVED) {
+        return true;
+    }
+    foreach ($s->joins as const &$j) {
+        if (goesBy($j->table, $name, $same)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+internal function goesBy(const Table& $t, const string& $name, const Owner?& $same) : bool
+{
+    if ($t->owner->qualifier != $name) {
+        return false;
+    }
+    if ($same == null) {
+        return true;
+    }
+    Owner $o = guard $same;
+    return $t->owner->sameTable($o);
+}

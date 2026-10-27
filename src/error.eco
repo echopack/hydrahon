@@ -1,0 +1,101 @@
+namespace hydrahon;
+
+/**
+ * A clause the chosen dialect cannot express.
+ */
+public enum Feature
+{
+    case returning;
+    case updateLimit;
+    case updateOrder;
+    case deleteLimit;
+    case deleteOrder;
+    case rightJoin;
+    case fullJoin;
+    case upsert;
+    case compoundOrder;
+    case insertWith;
+    case updateWith;
+    case deleteWith;
+    case starCount;
+}
+
+/**
+ * A statement that is wrong whatever the dialect.
+ */
+public enum Problem
+{
+    case noRows;
+    case noAssignments;
+    case rowShape;
+    case duplicateColumn;
+    case notAColumn;
+    case foreignColumn;
+    case conflictTarget;
+    case conflictAction;
+    case rawParams;
+    case divisionByZero;
+    case hiddenTarget;
+}
+
+/**
+ * Why a statement did not render.
+ */
+public enum Error
+{
+    case unsupported(Feature $feature);
+    case invalid(Problem $problem);
+}
+
+namespace str;
+
+public function from(const hydrahon::Feature& $f) : string
+{
+    return match ($f) {
+        hydrahon::Feature::returning => 'RETURNING',
+        hydrahon::Feature::updateLimit => 'UPDATE with LIMIT',
+        hydrahon::Feature::updateOrder => 'UPDATE with ORDER BY',
+        hydrahon::Feature::deleteLimit => 'DELETE with LIMIT',
+        hydrahon::Feature::deleteOrder => 'DELETE with ORDER BY',
+        hydrahon::Feature::rightJoin => 'RIGHT JOIN',
+        hydrahon::Feature::fullJoin => 'FULL JOIN',
+        hydrahon::Feature::upsert => 'upsert',
+        hydrahon::Feature::compoundOrder => 'ORDER BY or LIMIT inside a UNION branch',
+        hydrahon::Feature::insertWith => 'WITH before INSERT',
+        hydrahon::Feature::updateWith => 'WITH before UPDATE',
+        hydrahon::Feature::deleteWith => 'WITH before DELETE',
+        hydrahon::Feature::starCount => 'count of DISTINCT or UNION * across a join',
+    };
+}
+
+public function from(const hydrahon::Problem& $p) : string
+{
+    return match ($p) {
+        hydrahon::Problem::noRows => 'insert without rows',
+        hydrahon::Problem::noAssignments => 'update without assignments',
+        hydrahon::Problem::rowShape => 'insert rows set different columns',
+        hydrahon::Problem::duplicateColumn => 'a column is set twice',
+        hydrahon::Problem::notAColumn => 'an assignment target is not a column',
+        hydrahon::Problem::foreignColumn => 'a column belongs to another table',
+        hydrahon::Problem::conflictTarget => 'conflict update needs a target on this dialect',
+        hydrahon::Problem::conflictAction => 'conflict without update or ignore',
+        hydrahon::Problem::rawParams => 'raw placeholders and params differ in count',
+        hydrahon::Problem::divisionByZero => 'division by a literal zero',
+        hydrahon::Problem::hiddenTarget => 'a subquery reads the insert target under its table name, which hides the target row',
+    };
+}
+
+public function from(const hydrahon::Error& $e) : string
+{
+    match ($e) {
+        hydrahon::Error::unsupported($f) => {
+            $what = str::from($f);
+            return "unsupported by this dialect: {$what}";
+        },
+        hydrahon::Error::invalid($p) => {
+            $what = str::from($p);
+            return "invalid statement: {$what}";
+        },
+    };
+    return '';
+}

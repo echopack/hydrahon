@@ -1,0 +1,198 @@
+use hydrahon::{Select, Mysql, Postgres, Sqlite, Term, Cond, Table, Value, DateTime, Sql};
+use hydrahon::fn;
+
+test null_literal_is_null
+{
+    $u = UserTable();
+    assert(text<Mysql, Select>(Select(from: $u)->where($u->email->isNull())) == 'SELECT * FROM `users` WHERE `users`.`email` IS NULL');
+    assert(text<Mysql, Select>(Select(from: $u)->where($u->email->isNotNull())) == 'SELECT * FROM `users` WHERE `users`.`email` IS NOT NULL');
+}
+
+test null_at_runtime_is_null
+{
+    $u = UserTable();
+    string? $missing = null;
+    string? $known = 'a@b.ch';
+    assert(text<Postgres, Select>(Select(from: $u)->where($u->email == $missing)) == 'SELECT * FROM "users" WHERE "users"."email" IS NULL');
+    $s = render<Postgres, Select>(Select(from: $u)->where($u->email == $known));
+    assert($s->text == 'SELECT * FROM "users" WHERE "users"."email" = $1');
+    assert(kinds($s) == ':a@b.ch');
+}
+
+test in_list
+{
+    $u = UserTable();
+    $s = render<Postgres, Select>(Select(from: $u)->where($u->id in [1, 2, 3]));
+    assert($s->text == 'SELECT * FROM "users" WHERE "users"."id" IN ($1, $2, $3)');
+    assert(kinds($s) == 'III');
+}
+
+test in_empty_list_matches_nothing
+{
+    $u = UserTable();
+    array<int64> $none = [];
+    assert(text<Mysql, Select>(Select(from: $u)->where($u->id in $none)) == 'SELECT * FROM `users` WHERE 1 = 0');
+    assert(text<Mysql, Select>(Select(from: $u)->where(!($u->id in $none))) == 'SELECT * FROM `users` WHERE NOT (1 = 0)');
+}
+
+test between_and_like
+{
+    $u = UserTable();
+    $q = Select(from: $u)->where($u->views->between(1, 9))->where($u->name like 'ma%');
+    assert(text<Sqlite, Select>($q) == 'SELECT * FROM "users" WHERE "users"."views" BETWEEN ? AND ? AND "users"."name" LIKE ? ESCAPE \'\\\'');
+    // MySQL and Postgres escape with a backslash by default, SQLite only when told
+    assert(text<Postgres, Select>($q) == 'SELECT * FROM "users" WHERE "users"."views" BETWEEN $1 AND $2 AND "users"."name" LIKE $3');
+}
+
+test precedence
+{
+    $u = UserTable();
+    Term<bool> $loose = $u->active || $u->views > 1 && $u->age < 3;
+    Term<bool> $grouped = ($u->active || $u->views > 1) && $u->age < 3;
+    assert(text<Mysql, Select>(Select(from: $u)->where($loose)) == 'SELECT * FROM `users` WHERE `users`.`active` OR `users`.`views` > ? AND `users`.`age` < ?');
+    assert(text<Mysql, Select>(Select(from: $u)->where($grouped)) == 'SELECT * FROM `users` WHERE (`users`.`active` OR `users`.`views` > ?) AND `users`.`age` < ?');
+}
+
+test several_wheres_and_together
+{
+    $u = UserTable();
+    $q = Select(from: $u)->where($u->active || $u->views > 1)->where($u->age == 3);
+    assert(text<Mysql, Select>($q) == 'SELECT * FROM `users` WHERE (`users`.`active` OR `users`.`views` > ?) AND `users`.`age` = ?');
+}
+
+test not_groups
+{
+    $u = UserTable();
+    $q = Select(from: $u)->where(!($u->active && $u->views == 2));
+    assert(text<Postgres, Select>($q) == 'SELECT * FROM "users" WHERE NOT ("users"."active" AND "users"."views" = $1)');
+    $n = Select(from: $u)->where(!$u->active);
+    assert(text<Postgres, Select>($n) == 'SELECT * FROM "users" WHERE NOT "users"."active"');
+}
+
+test arithmetic
+{
+    $u = UserTable();
+    Term<bool> $a = $u->views + 1 > 10;
+    Term<bool> $b = ($u->views + 1) * 2 == $u->id;
+    Term<bool> $c = $u->views - ($u->id - 1) < 0;
+    Term<bool> $d = -(-$u->views) == $u->id;
+    assert(text<Mysql, Select>(Select(from: $u)->where($a)) == 'SELECT * FROM `users` WHERE `users`.`views` + ? > ?');
+    assert(text<Mysql, Select>(Select(from: $u)->where($b)) == 'SELECT * FROM `users` WHERE (`users`.`views` + ?) * ? = `users`.`id`');
+    assert(text<Mysql, Select>(Select(from: $u)->where($c)) == 'SELECT * FROM `users` WHERE `users`.`views` - (`users`.`id` - ?) < ?');
+    assert(text<Mysql, Select>(Select(from: $u)->where($d)) == 'SELECT * FROM `users` WHERE -(-`users`.`views`) = `users`.`id`');
+}
+
+test nullable_mixes
+{
+    $u = UserTable();
+    Term<bool> $a = $u->age == $u->views;
+    Term<bool> $b = $u->age + $u->views > 3;
+    assert(text<Sqlite, Select>(Select(from: $u)->where($a && $b)) == 'SELECT * FROM "users" WHERE "users"."age" = "users"."views" AND "users"."age" + "users"."views" > ?');
+}
+
+test raw_fragments
+{
+    $u = UserTable();
+    Term<bool> $r = hydrahon::raw<bool>('LOWER(?) = ?', ['A', 'a']);
+    $s = render<Postgres, Select>(Select(from: $u)->where($u->active)->where($r));
+    assert($s->text == 'SELECT * FROM "users" WHERE "users"."active" AND (LOWER($1) = $2)');
+    assert(kinds($s) == ':A:a');
+    Term<bool> $quoted = hydrahon::raw<bool>('name = \'?\' OR id = ?', [7]);
+    assert(text<Postgres, Select>(Select(from: $u)->where($quoted)) == 'SELECT * FROM "users" WHERE name = \'?\' OR id = $1');
+    Term<bool> $short = hydrahon::raw<bool>('a = ? AND b = ?', [1]);
+    assert(fails<Mysql, Select>(Select(from: $u)->where($short)) == 'invalid statement: raw placeholders and params differ in count');
+}
+
+test cond_lists
+{
+    $u = UserTable();
+    array<Term<bool>> $parts = [$u->active, $u->views > 1];
+    assert(text<Mysql, Select>(Select(from: $u)->where(Cond::any($parts))) == 'SELECT * FROM `users` WHERE `users`.`active` OR `users`.`views` > ?');
+    array<Term<bool>> $none = [];
+    assert(text<Mysql, Select>(Select(from: $u)->where(Cond::all($none))) == 'SELECT * FROM `users` WHERE 1 = 1');
+    assert(text<Mysql, Select>(Select(from: $u)->where(Cond::any($none))) == 'SELECT * FROM `users` WHERE 1 = 0');
+}
+
+test functions
+{
+    $u = UserTable();
+    $q = Select(from: $u)->fields([
+        fn::lower($u->name),
+        fn::length($u->name),
+        fn::coalesce($u->email, 'none'),
+        fn::now()->named('now'),
+    ]);
+    assert(text<Mysql, Select>($q) == 'SELECT LOWER(`users`.`name`), CHAR_LENGTH(`users`.`name`), COALESCE(`users`.`email`, ?), CURRENT_TIMESTAMP AS `now` FROM `users`');
+    assert(text<Sqlite, Select>($q) == 'SELECT LOWER("users"."name"), LENGTH("users"."name"), COALESCE("users"."email", ?), CURRENT_TIMESTAMP AS "now" FROM "users"');
+    $agg = Select(from: $u)->fields([fn::countDistinct($u->name), fn::max($u->age), fn::sum($u->views)->named('views')]);
+    assert(text<Postgres, Select>($agg) == 'SELECT COUNT(DISTINCT "users"."name"), MAX("users"."age"), SUM("users"."views") AS "views" FROM "users"');
+}
+
+test quoting_doubles_quotes
+{
+    $t = Table(name: 'we`ird"');
+    Term<int64> $c = $t->column<int64>('a"b`c');
+    $q = Select(from: $t)->fields([$c]);
+    assert(text<Mysql, Select>($q) == 'SELECT `we``ird"`.`a"b``c` FROM `we``ird"`');
+    assert(text<Postgres, Select>($q) == 'SELECT "we`ird"""."a""b`c" FROM "we`ird"""');
+}
+
+test raw_quoting_rules
+{
+    $u = UserTable();
+    // `?` inside any quoted span is text, and a doubled quote stays inside its span; rendered
+    // without the live dump, since no one server takes all three quote styles
+    Term<bool> $r = hydrahon::raw<bool>('a = \'it\'\'s ?\' AND "?" = `?` AND b = ?', [1]);
+    Sql $s = guard Select(from: $u)->where($u->id == 7 && $r)->sql<Postgres>();
+    assert($s->text == 'SELECT * FROM "users" WHERE "users"."id" = $1 AND (a = \'it\'\'s ?\' AND "?" = `?` AND b = $2)');
+    assert(kinds($s) == 'II');
+    Term<bool> $many = hydrahon::raw<bool>('a = ?', [1, 2]);
+    assert(fails<Postgres, Select>(Select(from: $u)->where($many)) == 'invalid statement: raw placeholders and params differ in count');
+    Term<bool> $none = hydrahon::raw<bool>('TRUE', []);
+    assert(text<Postgres, Select>(Select(from: $u)->where($none)) == 'SELECT * FROM "users" WHERE TRUE');
+}
+
+test raw_as_value
+{
+    $u = UserTable();
+    Term<int64> $r = hydrahon::raw<int64>('LENGTH(?)', ['abc']);
+    $q = Select(from: $u)->fields([$r->named('n')])->where($u->views > $r + 1)->order([$r]);
+    assert(text<Postgres, Select>($q) == 'SELECT LENGTH($1) AS "n" FROM "users" WHERE "users"."views" > (LENGTH($2)) + $3 ORDER BY LENGTH($4) ASC');
+}
+
+test precedence_edges
+{
+    $k = KindTable();
+    // comparisons never chain, on either side
+    assert(cond(($k->i == 1) == $k->b) == '("k"."i" = $1) = "k"."b"');
+    assert(cond($k->b == ($k->i == 1)) == '"k"."b" = ("k"."i" = $1)');
+    // left associative arithmetic needs no parentheses on the left, always on the right
+    assert(field($k->i - $k->i - $k->i) == '"k"."i" - "k"."i" - "k"."i"');
+    assert(field($k->i - ($k->i - $k->i)) == '"k"."i" - ("k"."i" - "k"."i")');
+    assert(field($k->i / ($k->i * $k->i)) == '"k"."i" / ("k"."i" * "k"."i")');
+    assert(field($k->i * $k->i + $k->i % $k->i) == '"k"."i" * "k"."i" + "k"."i" % "k"."i"');
+    assert(field(($k->i + $k->i) % $k->i) == '("k"."i" + "k"."i") % "k"."i"');
+    // IS NULL, IN and BETWEEN take an arithmetic operand bare, a comparison in parentheses
+    assert(cond(($k->ni + 1)->isNull()) == '"k"."ni" + $1 IS NULL');
+    assert(cond(($k->i == 1)->isNotNull()) == '("k"."i" = $1) IS NOT NULL');
+    assert(cond(($k->i * 2) in [4, 6]) == '"k"."i" * $1 IN ($2, $3)');
+    // AND inside OR is bare, OR inside AND is grouped, NOT binds tighter than both
+    assert(cond($k->b && $k->b || $k->b && $k->b) == '"k"."b" AND "k"."b" OR "k"."b" AND "k"."b"');
+    assert(cond(($k->b || $k->b) && ($k->b || $k->b)) == '("k"."b" OR "k"."b") AND ("k"."b" OR "k"."b")');
+    assert(cond(!$k->b && !$k->b) == 'NOT "k"."b" AND NOT "k"."b"');
+    assert(cond(!($k->b || $k->b)) == 'NOT ("k"."b" OR "k"."b")');
+    assert(cond($k->b || ($k->b || $k->b)) == '"k"."b" OR ("k"."b" OR "k"."b")');
+}
+
+test cond_folds_in_order
+{
+    $k = KindTable();
+    array<Term<bool>> $three = [$k->i == 1, $k->b || $k->b, $k->i == 2];
+    assert(cond(Cond::all($three)) == '"k"."i" = $1 AND ("k"."b" OR "k"."b") AND "k"."i" = $2');
+    array<Term<bool>> $mixed = [$k->b && $k->b, $k->i == 1];
+    assert(cond(Cond::any($mixed)) == '"k"."b" AND "k"."b" OR "k"."i" = $1');
+    array<Term<bool>> $one = [$k->b || $k->b];
+    assert(cond(Cond::all($one)) == '"k"."b" OR "k"."b"');
+    array<Term<bool>> $none = [];
+    assert(cond($k->b && Cond::any($none)) == '"k"."b" AND (1 = 0)');
+}

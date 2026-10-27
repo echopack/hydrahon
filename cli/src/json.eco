@@ -1,0 +1,78 @@
+/**
+ * Small readers over libjson for the decls JSON, where a missing key and a
+ * `null` mean the same thing: not there.
+ */
+
+namespace hydragen;
+
+public struct Json
+{
+    public static function field(const json::Value& $v, const string& $key) : json::Value
+    {
+        return $v->get($key) ?? json::nil();
+    }
+
+    public static function text(const json::Value& $v, const string& $key) : string
+    {
+        return Json::field($v, $key)->asStr() ?? '';
+    }
+
+    public static function int(const json::Value& $v, const string& $key) : int64
+    {
+        return Json::field($v, $key)->asInt() ?? 0;
+    }
+
+    public static function flag(const json::Value& $v, const string& $key) : bool
+    {
+        return Json::field($v, $key)->asBool() ?? false;
+    }
+
+    public static function items(const json::Value& $v, const string& $key) : array<json::Value>
+    {
+        return Json::field($v, $key)->asArray() ?? array<json::Value>();
+    }
+
+    /**
+     * Every `#[hydrahon::<name>]` the declaration carries.
+     */
+    public static function tools(const json::Value& $v) : array<json::Value>
+    {
+        array<json::Value> $out = array<json::Value>();
+        foreach (Json::items($v, 'tools') as const &$t) {
+            if (Json::text($t, 'namespace') == 'hydrahon') {
+                $out->push($t);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Whether `$v` carries `#[hydrahon::<name>]`, with or without a value.
+     */
+    public static function has(const json::Value& $v, const string& $name) : bool
+    {
+        return Json::find($v, $name) != null;
+    }
+
+    /**
+     * The text of `#[hydrahon::<name>: '...']`, empty when not written or
+     * written without a value.
+     */
+    public static function tool(const json::Value& $v, const string& $name) : string
+    {
+        json::Value $t = guard Json::find($v, $name) else {
+            return '';
+        }
+        return Json::text(Json::field($t, 'value'), 'text');
+    }
+
+    private static function find(const json::Value& $v, const string& $name) : json::Value?
+    {
+        foreach (Json::tools($v) as const &$t) {
+            if (Json::text($t, 'name') == $name) {
+                return $t;
+            }
+        }
+        return null;
+    }
+}

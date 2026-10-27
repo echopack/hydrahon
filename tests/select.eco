@@ -1,0 +1,289 @@
+use hydrahon::{Select, Mysql, Postgres, Sqlite, Order, Term};
+use hydrahon::fn;
+
+test select_star
+{
+    $u = UserTable();
+    $q = Select(from: $u);
+    assert(text<Mysql, Select>($q) == 'SELECT * FROM `users`');
+    assert(text<Postgres, Select>($q) == 'SELECT * FROM "users"');
+    assert(text<Sqlite, Select>($q) == 'SELECT * FROM "users"');
+}
+
+test select_fields_where_order_limit
+{
+    $u = UserTable();
+    $q = Select(from: $u)
+        ->fields([$u->id, $u->name])
+        ->where($u->active && $u->age >= 18)
+        ->order([$u->name, $u->id->desc()])
+        ->limit(20)
+        ->offset(40);
+    assert(text<Mysql, Select>($q) == 'SELECT `users`.`id`, `users`.`name` FROM `users` WHERE `users`.`active` AND `users`.`age` >= ? ORDER BY `users`.`name` ASC, `users`.`id` DESC LIMIT 20 OFFSET 40');
+    assert(text<Postgres, Select>($q) == 'SELECT "users"."id", "users"."name" FROM "users" WHERE "users"."active" AND "users"."age" >= $1 ORDER BY "users"."name" ASC, "users"."id" DESC LIMIT 20 OFFSET 40');
+    $s = render<Postgres, Select>($q);
+    assert($s->params->count() == 1);
+    assert(kinds($s) == 'I');
+}
+
+test select_join_group_having
+{
+    $u = UserTable();
+    $p = PostTable(alias: 'p');
+    $q = Select(from: $u)
+        ->fields([$u->name, fn::count($p->id)->named('posts')])
+        ->join(left: $p, on: $p->userId == $u->id)
+        ->group([$u->name])
+        ->having(fn::count($p->id) > 2);
+    assert(text<Mysql, Select>($q) == 'SELECT `users`.`name`, COUNT(`p`.`id`) AS `posts` FROM `users` LEFT JOIN `blog`.`posts` AS `p` ON `p`.`user_id` = `users`.`id` GROUP BY `users`.`name` HAVING COUNT(`p`.`id`) > ?');
+}
+
+test select_self_join
+{
+    $a = UserTable(alias: 'a');
+    $b = UserTable(alias: 'b');
+    $q = Select(from: $a)->fields([$a->id, $b->all()])->join(inner: $b, on: $a->id == $b->id && $b->active);
+    assert(text<Postgres, Select>($q) == 'SELECT "a"."id", "b".* FROM "users" AS "a" INNER JOIN "users" AS "b" ON "a"."id" = "b"."id" AND "b"."active"');
+}
+
+test select_join_kinds
+{
+    $u = UserTable();
+    $p = PostTable();
+    $right = Select(from: $u)->join(right: $p, on: $p->userId == $u->id);
+    $full = Select(from: $u)->join(full: $p, on: $p->userId == $u->id);
+    $cross = Select(from: $u)->join(cross: $p);
+    assert(text<Mysql, Select>($right) == 'SELECT * FROM `users` RIGHT JOIN `blog`.`posts` ON `posts`.`user_id` = `users`.`id`');
+    assert(text<Postgres, Select>($full) == 'SELECT * FROM "users" FULL OUTER JOIN "blog"."posts" ON "posts"."user_id" = "users"."id"');
+    assert(fails<Mysql, Select>($full) == 'unsupported by this dialect: FULL JOIN');
+    assert(fails<Sqlite, Select>($right) == '');
+    assert(fails<Sqlite, Select>($right) == '');
+    assert(text<Sqlite, Select>($cross) == 'SELECT * FROM "users" CROSS JOIN "blog"."posts"');
+    Sqlite $old = Sqlite(3038000);
+    $r = $full->sql($old);
+    assert(!$r->has_value());
+}
+
+test select_distinct_page
+{
+    $u = UserTable();
+    $q = Select(from: $u)->fields([$u->name])->distinct()->page(2, 25);
+    assert(text<Mysql, Select>($q) == 'SELECT DISTINCT `users`.`name` FROM `users` LIMIT 25 OFFSET 50');
+}
+
+test select_offset_without_limit
+{
+    $u = UserTable();
+    $q = Select(from: $u)->offset(5);
+    assert(text<Mysql, Select>($q) == 'SELECT * FROM `users` LIMIT 18446744073709551615 OFFSET 5');
+    assert(text<Postgres, Select>($q) == 'SELECT * FROM "users" OFFSET 5');
+    assert(text<Sqlite, Select>($q) == 'SELECT * FROM "users" LIMIT -1 OFFSET 5');
+}
+
+test select_union
+{
+    $u = UserTable();
+    $a = Select(from: $u)->fields([$u->id])->where($u->active);
+    $b = Select(from: $u)->fields([$u->id])->where($u->views > 10);
+    $q = $a;
+    $q->union(all: $b)->order([$u->id])->limit(5);
+    assert(text<Mysql, Select>($q) == 'SELECT `users`.`id` FROM `users` WHERE `users`.`active` UNION ALL SELECT `users`.`id` FROM `users` WHERE `users`.`views` > ? ORDER BY `id` ASC LIMIT 5');
+    $d = $a;
+    $d->union($b);
+    assert(text<Sqlite, Select>($d) == 'SELECT "users"."id" FROM "users" WHERE "users"."active" UNION SELECT "users"."id" FROM "users" WHERE "users"."views" > ?');
+    // the original is untouched by either branch
+    assert(text<Sqlite, Select>($a) == 'SELECT "users"."id" FROM "users" WHERE "users"."active"');
+}
+
+test select_union_branch_order
+{
+    $u = UserTable();
+    $b = Select(from: $u)->fields([$u->id])->order([$u->views->desc()])->limit(3);
+    $q = Select(from: $u)->fields([$u->id])->union($b);
+    assert(text<Postgres, Select>($q) == 'SELECT "users"."id" FROM "users" UNION (SELECT "users"."id" FROM "users" ORDER BY "users"."views" DESC LIMIT 3)');
+    assert(fails<Sqlite, Select>($q) == 'unsupported by this dialect: ORDER BY or LIMIT inside a UNION branch');
+}
+
+test select_cte
+{
+    $u = UserTable();
+    $recent = UserTable(cte: 'recent');
+    $q = Select(from: $recent)
+        ->with(name: 'recent', Select(from: $u)->where($u->active))
+        ->where($recent->views > 3);
+    assert(text<Mysql, Select>($q) == 'WITH `recent` AS (SELECT * FROM `users` WHERE `users`.`active`) SELECT * FROM `recent` WHERE `recent`.`views` > ?');
+}
+
+test select_recursive_cte
+{
+    $u = UserTable();
+    $tree = UserTable(cte: 'tree');
+    $seed = Select(from: $u)->fields([$u->id])->where($u->id == 1);
+    $step = Select(from: $u)->fields([$u->id])->join(inner: $tree, on: $u->views == $tree->id);
+    $seed->union(all: $step);
+    $q = Select(from: $tree)->with(recursive: 'tree', $seed);
+    assert(text<Postgres, Select>($q) == 'WITH RECURSIVE "tree" AS (SELECT "users"."id" FROM "users" WHERE "users"."id" = $1 UNION ALL SELECT "users"."id" FROM "users" INNER JOIN "tree" ON "users"."views" = "tree"."id") SELECT * FROM "tree"');
+}
+
+test select_subqueries
+{
+    $u = UserTable();
+    $p = PostTable(alias: 'p');
+    $authors = Select(from: $p)->fields([$p->userId])->where($p->id > 5);
+    $q = Select(from: $u)->where($u->views > 1)->where($u->id->in($authors))->limit(1);
+    assert(text<Postgres, Select>($q) == 'SELECT * FROM "users" WHERE "users"."views" > $1 AND "users"."id" IN (SELECT "p"."user_id" FROM "blog"."posts" AS "p" WHERE "p"."id" > $2) LIMIT 1');
+    $mine = Select(from: $p)->where($p->userId == $u->id);
+    $e = Select(from: $u)->where($mine->exists());
+    assert(text<Mysql, Select>($e) == 'SELECT * FROM `users` WHERE EXISTS (SELECT * FROM `blog`.`posts` AS `p` WHERE `p`.`user_id` = `users`.`id`)');
+    $n = Select(from: $p)->fields([fn::count()])->where($p->userId == $u->id);
+    $s = Select(from: $u)->fields([$u->name, $n->scalar<int64>()->named('posts')]);
+    assert(text<Sqlite, Select>($s) == 'SELECT "users"."name", (SELECT COUNT(*) FROM "blog"."posts" AS "p" WHERE "p"."user_id" = "users"."id") AS "posts" FROM "users"');
+    $any = Select(from: $p)->where($p->userId == 1);
+    $found = Select(fields: [$any->exists()->named('found')]);
+    assert(text<Mysql, Select>($found) == 'SELECT EXISTS (SELECT * FROM `blog`.`posts` AS `p` WHERE `p`.`user_id` = ?) AS `found`');
+}
+
+test select_count
+{
+    $u = UserTable();
+    $q = Select(from: $u)->where($u->active)->order([$u->name]);
+    $c = $q->count();
+    assert(text<Mysql, Select>($c) == 'SELECT COUNT(*) AS `count` FROM `users` WHERE `users`.`active`');
+    assert(text<Mysql, Select>($q) == 'SELECT * FROM `users` WHERE `users`.`active` ORDER BY `users`.`name` ASC');
+    $paged = $q;
+    $paged->limit(10);
+    assert(text<Mysql, Select>($paged->count()) == 'SELECT COUNT(*) AS `count` FROM (SELECT 1 FROM `users` WHERE `users`.`active` ORDER BY `users`.`name` ASC LIMIT 10) AS `_h`');
+    $grouped = Select(from: $u)->fields([$u->name])->group([$u->name]);
+    assert(text<Postgres, Select>($grouped->count()) == 'SELECT COUNT(*) AS "count" FROM (SELECT 1 FROM "users" GROUP BY "users"."name") AS "_h"');
+}
+
+test select_appends_and_conditions
+{
+    $u = UserTable();
+    $k = KindTable();
+    $q = Select(from: $u)->fields([$u->id])->fields([$u->name->named('n')]);
+    assert(text<Mysql, Select>($q) == 'SELECT `users`.`id`, `users`.`name` AS `n` FROM `users`');
+    $n = Select(from: $k)->where($k->nb)->where($k->nb || $k->b);
+    assert(text<Postgres, Select>($n) == 'SELECT * FROM "k" WHERE "k"."nb" AND ("k"."nb" OR "k"."b")');
+    $h = Select(from: $u)->fields([$u->name])->group([$u->name, $u->views + 1])->having(fn::count() > 1 || fn::count() < 0)->having(fn::max($u->age) > 3);
+    assert(text<Postgres, Select>($h) == 'SELECT "users"."name" FROM "users" GROUP BY "users"."name", "users"."views" + $1 HAVING (COUNT(*) > $2 OR COUNT(*) < $3) AND MAX("users"."age") > $4');
+}
+
+test select_order_expressions
+{
+    $u = UserTable();
+    $q = Select(from: $u)->order([fn::lower($u->name)->desc(), ($u->views * 2)->asc(), $u->id]);
+    assert(text<Sqlite, Select>($q) == 'SELECT * FROM "users" ORDER BY LOWER("users"."name") DESC, "users"."views" * ? ASC, "users"."id" ASC');
+}
+
+test select_limits
+{
+    $u = UserTable();
+    $q = Select(from: $u)->limit(5)->offset(10);
+    assert(text<Mysql, Select>($q) == 'SELECT * FROM `users` LIMIT 5 OFFSET 10');
+    assert(text<Postgres, Select>($q) == 'SELECT * FROM "users" LIMIT 5 OFFSET 10');
+    assert(text<Sqlite, Select>($q) == 'SELECT * FROM "users" LIMIT 5 OFFSET 10');
+    assert(text<Postgres, Select>(Select(from: $u)->page(0, 10)) == 'SELECT * FROM "users" LIMIT 10 OFFSET 0');
+    assert(text<Postgres, Select>(Select(from: $u)->page(3, 0)) == 'SELECT * FROM "users" LIMIT 0 OFFSET 0');
+    // a later call wins
+    assert(text<Postgres, Select>(Select(from: $u)->limit(1)->limit(2)->page(1, 3)) == 'SELECT * FROM "users" LIMIT 3 OFFSET 3');
+}
+
+test select_without_from
+{
+    $u = UserTable();
+    $q = Select(fields: [fn::now()->named('now')]);
+    assert(text<Postgres, Select>($q) == 'SELECT CURRENT_TIMESTAMP AS "now"');
+    $any = Select(from: $u)->where($u->active);
+    $w = Select(fields: [(!$any->exists())->named('none')]);
+    assert(text<Mysql, Select>($w) == 'SELECT NOT EXISTS (SELECT * FROM `users` WHERE `users`.`active`) AS `none`');
+}
+
+test select_scalar_comparison
+{
+    $u = UserTable();
+    $o = UserTable(alias: 'o');
+    $avg = Select(from: $o)->fields([fn::max($o->views)]);
+    Term<int64?> $top = $avg->scalar<int64?>();
+    $q = Select(from: $u)->where($u->views == $top);
+    assert(text<Postgres, Select>($q) == 'SELECT * FROM "users" WHERE "users"."views" = (SELECT MAX("o"."views") FROM "users" AS "o")');
+    $ids = Select(from: $o)->fields([$o->age])->where($o->active);
+    $in = Select(from: $u)->where($u->age->in($ids))->where(!$u->id->in(Select(from: $o)->fields([$o->id])));
+    assert(text<Mysql, Select>($in) == 'SELECT * FROM `users` WHERE `users`.`age` IN (SELECT `o`.`age` FROM `users` AS `o` WHERE `o`.`active`) AND NOT (`users`.`id` IN (SELECT `o`.`id` FROM `users` AS `o`))');
+}
+
+test select_joins
+{
+    $u = UserTable();
+    $p = PostTable(alias: 'p');
+    $q2 = PostTable(alias: 'q');
+    $s = Select(from: $u)
+        ->fields([$u->name, $p->title, $q2->all()])
+        ->join(inner: $p, on: $p->userId == $u->id)
+        ->join(left: $q2, on: $q2->userId == $u->id && $q2->id != $p->id)
+        ->join(cross: UserTable(alias: 'c'));
+    assert(text<Postgres, Select>($s) == 'SELECT "users"."name", "p"."title", "q".* FROM "users" INNER JOIN "blog"."posts" AS "p" ON "p"."user_id" = "users"."id" LEFT JOIN "blog"."posts" AS "q" ON "q"."user_id" = "users"."id" AND "q"."id" <> "p"."id" CROSS JOIN "users" AS "c"');
+    assert(text<Mysql, Select>(Select(from: $p)->fields([$p->all()])) == 'SELECT `p`.* FROM `blog`.`posts` AS `p`');
+}
+
+test select_unions
+{
+    $u = UserTable();
+    $a = Select(from: $u)->fields([$u->id, $u->name])->where($u->id == 1);
+    $b = Select(from: $u)->fields([$u->id, $u->name])->where($u->id == 2);
+    $c = Select(from: $u)->fields([$u->id, $u->name])->where($u->id == 3);
+    $q = $a;
+    $q->union($b)->union(all: $c)->order([$u->name->desc(), $u->id]);
+    $s = render<Postgres, Select>($q);
+    assert($s->text == 'SELECT "users"."id", "users"."name" FROM "users" WHERE "users"."id" = $1 UNION SELECT "users"."id", "users"."name" FROM "users" WHERE "users"."id" = $2 UNION ALL SELECT "users"."id", "users"."name" FROM "users" WHERE "users"."id" = $3 ORDER BY "name" DESC, "id" ASC');
+    assert(kinds($s) == 'III');
+    // a branch that is itself a union keeps its grouping
+    $inner = $b;
+    $inner->union(all: $c);
+    $nested = $a;
+    $nested->union($inner);
+    assert(text<Postgres, Select>($nested) == 'SELECT "users"."id", "users"."name" FROM "users" WHERE "users"."id" = $1 UNION (SELECT "users"."id", "users"."name" FROM "users" WHERE "users"."id" = $2 UNION ALL SELECT "users"."id", "users"."name" FROM "users" WHERE "users"."id" = $3)');
+    assert(fails<Sqlite, Select>($nested) == 'unsupported by this dialect: ORDER BY or LIMIT inside a UNION branch');
+}
+
+test select_ctes
+{
+    $u = UserTable();
+    $a = UserTable(cte: 'a');
+    $b = UserTable(cte: 'b');
+    $tree = UserTable(cte: 'tree');
+    $q = Select(from: $a)
+        ->with(name: 'a', Select(from: $u)->where($u->active))
+        ->with(recursive: 'tree', Select(from: $u)->fields([$u->id]))
+        ->with(name: 'b', Select(from: $a)->where($a->views > 1))
+        ->join(inner: $b, on: $b->id == $a->id)
+        ->join(left: $tree, on: $tree->id == $a->id);
+    assert(text<Postgres, Select>($q) == 'WITH RECURSIVE "a" AS (SELECT * FROM "users" WHERE "users"."active"), "tree" AS (SELECT "users"."id" FROM "users"), "b" AS (SELECT * FROM "a" WHERE "a"."views" > $1) SELECT * FROM "a" INNER JOIN "b" ON "b"."id" = "a"."id" LEFT JOIN "tree" ON "tree"."id" = "a"."id"');
+    // a schema handle read as a cte drops the schema
+    $posts = PostTable(cte: 'mine');
+    $p = PostTable();
+    $m = Select(from: $posts)->with(name: 'mine', Select(from: $p)->where($p->userId == 1));
+    assert(text<Mysql, Select>($m) == 'WITH `mine` AS (SELECT * FROM `blog`.`posts` WHERE `posts`.`user_id` = ?) SELECT * FROM `mine`');
+}
+
+test select_counts
+{
+    $u = UserTable();
+    $p = PostTable(alias: 'p');
+    $d = Select(from: $u)->fields([$u->name])->distinct();
+    assert(text<Postgres, Select>($d->count()) == 'SELECT COUNT(*) AS "count" FROM (SELECT DISTINCT "users"."name" FROM "users") AS "_h"');
+    $joined = Select(from: $u)->join(inner: $p, on: $p->userId == $u->id)->where($u->active);
+    assert(text<Mysql, Select>($joined->count()) == 'SELECT COUNT(*) AS `count` FROM `users` INNER JOIN `blog`.`posts` AS `p` ON `p`.`user_id` = `users`.`id` WHERE `users`.`active`');
+    $a = Select(from: $u)->fields([$u->id]);
+    $both = $a;
+    $both->union(Select(from: $p)->fields([$p->userId]));
+    assert(text<Postgres, Select>($both->count()) == 'SELECT COUNT(*) AS "count" FROM (SELECT "users"."id" FROM "users" UNION SELECT "p"."user_id" FROM "blog"."posts" AS "p") AS "_h"');
+    $recent = UserTable(cte: 'recent');
+    $withed = Select(from: $recent)->with(name: 'recent', Select(from: $u)->where($u->active))->offset(2);
+    assert(text<Postgres, Select>($withed->count()) == 'WITH "recent" AS (SELECT * FROM "users" WHERE "users"."active") SELECT COUNT(*) AS "count" FROM (SELECT 1 FROM "recent" OFFSET 2) AS "_h"');
+    $plain = Select(from: $u)->fields([$u->name])->where($u->active)->order([$u->name])->with(name: 'unused', Select(from: $u));
+    assert(text<Mysql, Select>($plain->count()) == 'WITH `unused` AS (SELECT * FROM `users`) SELECT COUNT(*) AS `count` FROM `users` WHERE `users`.`active`');
+    // counting a count
+    $twice = Select(from: $u)->limit(3)->count()->count();
+    assert(text<Postgres, Select>($twice) == 'SELECT COUNT(*) AS "count" FROM (SELECT COUNT(*) AS "count" FROM (SELECT 1 FROM "users" LIMIT 3) AS "_h") AS "_h"');
+}

@@ -1,0 +1,14 @@
+#[module: "hydrahon-shop"]
+#[version: "0.1.0"]
+
+#[depends: "../.."]
+#[depends: "../../../libmysql"]
+#[sources: "src/*.eco"]
+
+#[if: !HYDRAHON_NOGEN]
+#[sources: ".hydrahon/*.eco"]
+#[end]
+
+#[target: exe { name: "shop", entry: "shop.eco" }] {
+    #[sources: "shop.eco"]
+}

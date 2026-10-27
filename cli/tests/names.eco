@@ -1,0 +1,60 @@
+namespace hydragen;
+
+test snake_case_columns
+{
+    assert(Names::snake('createdAt') == 'created_at');
+    assert(Names::snake('id') == 'id');
+    assert(Names::snake('avatarURL') == 'avatar_url');
+    assert(Names::snake('HTTPCode') == 'http_code');
+    assert(Names::snake('line2Total') == 'line2_total');
+}
+
+test qualified_names
+{
+    assert(Names::local('app::models::User') == 'User');
+    assert(Names::space('app::models::User') == 'app::models');
+    assert(Names::space('User') == '');
+    assert(Names::literal('created_at'));
+    assert(!Names::literal("it's"));
+    assert(!Names::literal(''));
+}
+
+test snake_case_edges
+{
+    assert(Names::snake('') == '');
+    assert(Names::snake('a') == 'a');
+    assert(Names::snake('A') == 'a');
+    assert(Names::snake('ID') == 'id');
+    assert(Names::snake('userID') == 'user_id');
+    assert(Names::snake('Name') == 'name');
+    assert(Names::snake('already_snake') == 'already_snake');
+    assert(Names::snake('a1B2c') == 'a1_b2c');
+    assert(Names::snake('ipV4Address') == 'ip_v4_address');
+    assert(Names::snake('XMLHttpRequest') == 'xml_http_request');
+}
+
+test qualified_name_edges
+{
+    assert(Names::local('User') == 'User');
+    assert(Names::local('a::B') == 'B');
+    assert(Names::space('a::B') == 'a');
+    assert(Names::space('a::b::c::D') == 'a::b::c');
+}
+
+test literal_refuses_what_breaks_a_quote
+{
+    assert(Names::literal('odd name.with dots'));
+    assert(Names::literal('名前'));
+    assert(!Names::literal('back\\slash'));
+    assert(!Names::literal("tab\there"));
+    assert(!Names::literal("line\nbreak"));
+}
+
+test prose_keeps_comments_closed
+{
+    assert(Names::prose('users') == 'users');
+    assert(Names::prose('a*/b') == 'a* /b');
+    assert(Names::prose('*/*/') == '* /* /');
+    assert(Names::prose('a/*b') == 'a/*b');
+    assert(Names::prose('*') == '*');
+}

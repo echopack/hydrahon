@@ -1,0 +1,21 @@
+/*
+ * hydragen: writes typed table handles for #[hydrahon::table] structs.
+ *
+ * Reads the module's declarations through `echoc -p decls`, checks every
+ * #[hydrahon::...] attribute, and writes `.hydrahon/tables.eco`. A module of
+ * its own, so a broken checkout of the code it generates for cannot stop
+ * the tool that regenerates it.
+ */
+
+#[module: "hydragen"]
+#[version: "0.1.0"]
+#[sources: "src/*.eco"]
+#[depends: "../../libjson"]
+
+#[target: exe { name: "hydragen", entry: "main.eco" }] {
+    #[sources: "main.eco"]
+}
+
+#[target: test] {
+    #[sources: "tests/*.eco"]
+}

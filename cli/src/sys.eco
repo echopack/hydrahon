@@ -1,0 +1,34 @@
+/**
+ * File helpers on top of std::io: reads that treat missing as empty, and
+ * writes that leave an unchanged file alone.
+ */
+
+namespace hydragen;
+
+use std::io;
+
+public struct Sys
+{
+    /**
+     * The file's text, or empty when it is missing or unreadable.
+     */
+    public static function read(const string& $path) : string
+    {
+        return io::readfile($path)->or('');
+    }
+
+    /**
+     * Write `$text` unless the file already holds exactly that, so an
+     * unchanged file does not invalidate echoc's cache.
+     */
+    public static function put(const string& $path, const string& $text) : bool
+    {
+        if (Sys::read($path) == $text) {
+            return true;
+        }
+        guard io::writefile($path, $text) else {
+            return false;
+        }
+        return true;
+    }
+}

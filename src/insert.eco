@@ -1,0 +1,239 @@
+namespace hydrahon;
+
+/**
+ * One `column => value` entry of a `Values`, not yet checked against a table: the render does
+ * that, against the statement's table.
+ */
+internal struct Pair
+{
+    // not optional, so the checks borrow it instead of copying it out
+    internal Ident $column;
+    // false when the target is not a column, and `$column` means nothing
+    internal bool $named;
+    internal Node $value;
+
+    internal static function of(const Node& $column, Node $value) : Pair
+    {
+        return match ($column) {
+            Node::column($id) => Pair($id, true, mv $value),
+            else => Pair(Ident(Owner('', null, '', false, false), '', 0), false, mv $value),
+        };
+    }
+
+    /**
+     * Whether this and `$other` set the same column of the same table.
+     */
+    internal const function sameColumn(const Pair& $other) : bool
+    {
+        return $this->named && $other->named && $this->column->sameColumn($other->column);
+    }
+}
+
+/**
+ * The `column => value` entries of one insert row, an update or an upsert, filled from a map
+ * literal: `[$u->name => 'Mario', $u->email => null, $u->createdAt => fn::now()]`. Each entry
+ * picks its operator from the column's type, so a value of the wrong type does not compile. A
+ * value is either a plain value or an expression of the column's type.
+ *
+ * Built by hand it is the same thing: `$v[$u->name] = 'Mario';`.
+ */
+public struct Values
+{
+    internal array<Pair> $items = [];
+    // set by `Insert::row`: this row sets the first row's columns in its order, worked out once
+    // so a render does not walk every row twice to find out
+    internal bool $fits = false;
+
+    internal function put(const Node& $column, Node $value) : void
+    {
+        if ($this->items->count() == 0) {
+            $this->items->reserve(4);
+        }
+        $this->items[] = Pair::of($column, mv $value);
+    }
+
+    internal function add(Values $more) : void
+    {
+        if ($this->items->count() == 0) {
+            $this = mv $more;
+            return;
+        }
+        $this->items->extend($more->items);
+    }
+
+    /**
+     * Whether this sets the columns of `$first`, of the same table, in the same order.
+     */
+    internal const function aligned(const Values& $first) : bool
+    {
+        const array<Pair>& $mine = $this->items;
+        const array<Pair>& $theirs = $first->items;
+        if ($mine->count() != $theirs->count()) {
+            return false;
+        }
+        usize $i = 0;
+        while ($i < $mine->count()) {
+            if (!$mine[$i]->sameColumn($theirs[$i])) {
+                return false;
+            }
+            $i = $i + 1;
+        }
+        return true;
+    }
+
+    /**
+     * Why these entries don't fit `$home`, if they don't: each has to set one of its columns, and
+     * no column twice.
+     */
+    internal const function problem(const Table& $home) : Problem?
+    {
+        const array<Pair>& $items = $this->items;
+        usize $i = 0;
+        while ($i < $items->count()) {
+            if (!$items[$i]->named) {
+                return Problem::notAColumn;
+            }
+            if (!$items[$i]->column->of($home)) {
+                return Problem::foreignColumn;
+            }
+            usize $j = 0;
+            while ($j < $i) {
+                if ($items[$j]->sameColumn($items[$i])) {
+                    return Problem::duplicateColumn;
+                }
+                $j = $j + 1;
+            }
+            $i = $i + 1;
+        }
+        return null;
+    }
+}
+
+/**
+ * An INSERT of one or more rows, with an optional upsert and RETURNING.
+ *
+ * ```echo
+ * $q = hydrahon::Insert(into: $u)
+ *     ->row([$u->name => 'Mario', $u->email => null])
+ *     ->row([$u->name => 'Boris', $u->email => 'b@x.ch'])
+ *     ->conflict([$u->email])->update(inserted: [$u->name]);
+ * ```
+ */
+public struct Insert
+{
+    internal Table $into;
+    internal array<Values> $rows = array<Values>();
+    internal bool $conflicts = false;
+    internal array<Node> $targets = array<Node>();
+    internal bool $skip = false;
+    internal Values $updates = Values();
+    internal array<Field> $returns = array<Field>();
+    internal array<Cte> $ctes = array<Cte>();
+
+    public constructor(into: Source $source)
+    {
+        $this->into = $source->table();
+    }
+
+    public constructor(into: Table $table)
+    {
+        $this->into = $table;
+    }
+
+    /**
+     * Add one row. Every row has to set the same columns, in any order.
+     */
+    public function row(Values $values) : Insert&
+    {
+        if ($this->rows->count() == 0) {
+            $this->rows->reserve(8);
+            $values->fits = true;
+        } else {
+            $values->fits = $values->aligned($this->rows[0]);
+        }
+        $this->rows[] = mv $values;
+        return $this;
+    }
+
+    /**
+     * React to a unique key conflict on any key. Postgres and SQLite need a target to update.
+     */
+    public function conflict() : Insert&
+    {
+        $this->conflicts = true;
+        return $this;
+    }
+
+    /**
+     * React to a conflict on `$target`. MySQL has no conflict target and reacts to any key.
+     */
+    public function conflict(array<Expr> $target) : Insert&
+    {
+        $this->conflicts = true;
+        foreach ($target as &$t) {
+            $this->targets[] = own($t->node);
+        }
+        return $this;
+    }
+
+    /**
+     * On conflict, set these columns of the existing row. A value may read the existing row
+     * through the columns: `[$u->views => $u->views + 1]`.
+     */
+    public function update(Values $values) : Insert&
+    {
+        $this->updates->add(mv $values);
+        return $this;
+    }
+
+    /**
+     * On conflict, overwrite `$columns` with the values this insert tried to write.
+     */
+    public function update(inserted: array<Expr> $columns) : Insert&
+    {
+        foreach ($columns as const &$c) {
+            $this->updates->put($c->node, excluded($c->node));
+        }
+        return $this;
+    }
+
+    /**
+     * On conflict, keep the existing row and skip this one.
+     */
+    public function ignore() : Insert&
+    {
+        $this->skip = true;
+        return $this;
+    }
+
+    public function returning(array<Field> $fields) : Insert&
+    {
+        adopt($this->returns, mv $fields);
+        return $this;
+    }
+
+    public function with(name: string $name, Select $query) : Insert&
+    {
+        $this->ctes[] = Cte($name, false, rc<Select>(mv $query));
+        return $this;
+    }
+
+    public function with(recursive: string $name, Select $query) : Insert&
+    {
+        $this->ctes[] = Cte($name, true, rc<Select>(mv $query));
+        return $this;
+    }
+
+    public const function sql<D : Dialect>(const D& $dialect) : result<Sql, Error>
+    {
+        $r = Renderer<D>($dialect);
+        $r->insert($this);
+        return $r->finish();
+    }
+
+    public const function sql<D : Dialect>() : result<Sql, Error>
+    {
+        D $dialect = D();
+        return $this->sql($dialect);
+    }
+}

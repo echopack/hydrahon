@@ -1,0 +1,337 @@
+namespace hydrahon;
+
+/**
+ * An exact decimal number, kept as its text so no precision is lost on the way to the server.
+ * The server parses it; hydrahon only binds it.
+ */
+public struct Decimal
+{
+    public string $text;
+
+    /**
+     * Whether the text spells zero, in any sign, scale or exponent.
+     */
+    internal const function zero() : bool
+    {
+        bool $digit = false;
+        usize $i = 0;
+        while ($i < $this->text->size()) {
+            uint8 $b = $this->text->byte($i);
+            if ($b == 101 || $b == 69) {
+                // the exponent of a zero mantissa does not matter
+                break;
+            }
+            if ($b > 48 && $b <= 57) {
+                return false;
+            }
+            if ($b == 48) {
+                $digit = true;
+            }
+            $i = $i + 1;
+        }
+        return $digit;
+    }
+}
+
+/**
+ * Binary data. Wrapping the string tells the dialect and the binder that it is bytes, not text.
+ */
+public struct Bytes
+{
+    public string $data;
+}
+
+/**
+ * A calendar date.
+ */
+public struct Date
+{
+    public uint16 $year = 0;
+    public uint8 $month = 0;
+    public uint8 $day = 0;
+}
+
+/**
+ * A wall clock date and time, to the microsecond, without a timezone.
+ */
+public struct DateTime
+{
+    public uint16 $year = 0;
+    public uint8 $month = 0;
+    public uint8 $day = 0;
+    public uint8 $hour = 0;
+    public uint8 $minute = 0;
+    public uint8 $second = 0;
+    public uint32 $micro = 0;
+
+    public constructor(uint16 $year = 0, uint8 $month = 0, uint8 $day = 0, uint8 $hour = 0, uint8 $minute = 0, uint8 $second = 0, uint32 $micro = 0)
+    {
+        $this->year = $year;
+        $this->month = $month;
+        $this->day = $day;
+        $this->hour = $hour;
+        $this->minute = $minute;
+        $this->second = $second;
+        $this->micro = $micro;
+    }
+
+    /**
+     * The UTC date and time `$seconds` after 1970-01-01 00:00:00. Negative values reach back
+     * before the epoch.
+     */
+    public constructor(unix: int64 $seconds)
+    {
+        int64 $days = $seconds / 86400;
+        int64 $rest = $seconds % 86400;
+        if ($rest < 0) {
+            $rest = $rest + 86400;
+            $days = $days - 1;
+        }
+        // civil from days, after Howard Hinnant's algorithm
+        int64 $z = $days + 719468;
+        int64 $era = $z / 146097;
+        if ($z < 0 && $z % 146097 != 0) {
+            $era = $era - 1;
+        }
+        int64 $doe = $z - $era * 146097;
+        int64 $yoe = ($doe - $doe / 1460 + $doe / 36524 - $doe / 146096) / 365;
+        int64 $doy = $doe - (365 * $yoe + $yoe / 4 - $yoe / 100);
+        int64 $mp = (5 * $doy + 2) / 153;
+        int64 $d = $doy - (153 * $mp + 2) / 5 + 1;
+        int64 $m = $mp + 3;
+        if ($mp >= 10) {
+            $m = $mp - 9;
+        }
+        int64 $y = $yoe + $era * 400;
+        if ($m <= 2) {
+            $y = $y + 1;
+        }
+        $this->year = $y as uint16;
+        $this->month = $m as uint8;
+        $this->day = $d as uint8;
+        int64 $h = $rest / 3600;
+        int64 $min = $rest % 3600 / 60;
+        int64 $sec = $rest % 60;
+        $this->hour = $h as uint8;
+        $this->minute = $min as uint8;
+        $this->second = $sec as uint8;
+    }
+}
+
+/**
+ * A time of day, or a signed span when the database allows one past 24 hours.
+ */
+public struct Time
+{
+    public bool $negative = false;
+    public uint32 $hours = 0;
+    public uint8 $minute = 0;
+    public uint8 $second = 0;
+    public uint32 $micro = 0;
+}
+
+/**
+ * One bound parameter. Every literal a statement takes ends up as one of these, in placeholder
+ * order, and a `Binder` hands them to the driver.
+ */
+public enum Value
+{
+    case none;
+    case bool(bool $v);
+    case int(int64 $v);
+    case uint(uint64 $v);
+    case float(float64 $v);
+    case decimal(Decimal $v);
+    case text(string $v);
+    case bytes(Bytes $v);
+    case date(Date $v);
+    case datetime(DateTime $v);
+    case time(Time $v);
+
+    #[implicit]
+    public static function from(bool $v) : Value
+    {
+        return .bool($v);
+    }
+
+    #[implicit]
+    public static function from(int32 $v) : Value
+    {
+        return .int($v as int64);
+    }
+
+    #[implicit]
+    public static function from(int64 $v) : Value
+    {
+        return .int($v);
+    }
+
+    #[implicit]
+    public static function from(uint32 $v) : Value
+    {
+        return .uint($v as uint64);
+    }
+
+    #[implicit]
+    public static function from(uint64 $v) : Value
+    {
+        return .uint($v);
+    }
+
+    #[implicit]
+    public static function from(float64 $v) : Value
+    {
+        return .float($v);
+    }
+
+    #[implicit]
+    public static function from(Decimal $v) : Value
+    {
+        return .decimal($v);
+    }
+
+    #[implicit]
+    public static function from(string $v) : Value
+    {
+        return .text($v);
+    }
+
+    #[implicit]
+    public static function from(Bytes $v) : Value
+    {
+        return .bytes($v);
+    }
+
+    #[implicit]
+    public static function from(Date $v) : Value
+    {
+        return .date($v);
+    }
+
+    #[implicit]
+    public static function from(DateTime $v) : Value
+    {
+        return .datetime($v);
+    }
+
+    #[implicit]
+    public static function from(Time $v) : Value
+    {
+        return .time($v);
+    }
+
+    #[implicit]
+    public static function from(bool? $v) : Value
+    {
+        bool $x = guard $v else {
+            return .none();
+        }
+        return .bool($x);
+    }
+
+    #[implicit]
+    public static function from(int64? $v) : Value
+    {
+        int64 $x = guard $v else {
+            return .none();
+        }
+        return .int($x);
+    }
+
+    #[implicit]
+    public static function from(uint64? $v) : Value
+    {
+        uint64 $x = guard $v else {
+            return .none();
+        }
+        return .uint($x);
+    }
+
+    #[implicit]
+    public static function from(float64? $v) : Value
+    {
+        float64 $x = guard $v else {
+            return .none();
+        }
+        return .float($x);
+    }
+
+    #[implicit]
+    public static function from(Decimal? $v) : Value
+    {
+        Decimal $x = guard $v else {
+            return .none();
+        }
+        return .decimal($x);
+    }
+
+    #[implicit]
+    public static function from(string? $v) : Value
+    {
+        string $x = guard $v else {
+            return .none();
+        }
+        return .text($x);
+    }
+
+    #[implicit]
+    public static function from(Bytes? $v) : Value
+    {
+        Bytes $x = guard $v else {
+            return .none();
+        }
+        return .bytes($x);
+    }
+
+    #[implicit]
+    public static function from(Date? $v) : Value
+    {
+        Date $x = guard $v else {
+            return .none();
+        }
+        return .date($x);
+    }
+
+    #[implicit]
+    public static function from(DateTime? $v) : Value
+    {
+        DateTime $x = guard $v else {
+            return .none();
+        }
+        return .datetime($x);
+    }
+
+    #[implicit]
+    public static function from(Time? $v) : Value
+    {
+        Time $x = guard $v else {
+            return .none();
+        }
+        return .time($x);
+    }
+
+    /**
+     * Whether this is SQL NULL.
+     */
+    public const function isNull() : bool
+    {
+        return match ($this) {
+            Value::none => true,
+            else => false,
+        };
+    }
+
+    /**
+     * Whether this is a numeric zero.
+     */
+    internal const function zero() : bool
+    {
+        return match ($this) {
+            Value::int($v) => $v == 0,
+            Value::uint($v) => $v == 0,
+            Value::float($v) => $v == 0.0,
+            Value::decimal($v) => $v->zero(),
+            else => false,
+        };
+    }
+}

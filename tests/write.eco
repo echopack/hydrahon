@@ -1,0 +1,148 @@
+use hydrahon::{Update, Delete, Truncate, Drop, Select, Term, Mysql, Postgres, Sqlite};
+use hydrahon::fn;
+
+test update_set_where
+{
+    $u = UserTable();
+    $q = Update($u)->set([$u->views => $u->views + 1, $u->email => null])->where($u->id == 7);
+    $s = render<Mysql, Update>($q);
+    assert($s->text == 'UPDATE `users` SET `views` = `users`.`views` + ?, `email` = ? WHERE `users`.`id` = ?');
+    assert(kinds($s) == 'INI');
+    assert(text<Postgres, Update>($q) == 'UPDATE "users" SET "views" = "users"."views" + $1, "email" = $2 WHERE "users"."id" = $3');
+}
+
+test update_alias
+{
+    $x = UserTable(alias: 'x');
+    $q = Update($x)->set([$x->views => 0])->where($x->active);
+    assert(text<Postgres, Update>($q) == 'UPDATE "users" AS "x" SET "views" = $1 WHERE "x"."active"');
+}
+
+test update_limit_order
+{
+    $u = UserTable();
+    $q = Update($u)->set([$u->views => 0])->order([$u->id])->limit(10);
+    assert(text<Mysql, Update>($q) == 'UPDATE `users` SET `views` = ? ORDER BY `users`.`id` ASC LIMIT 10');
+    assert(fails<Postgres, Update>($q) == 'unsupported by this dialect: UPDATE with ORDER BY');
+    $l = Update($u)->set([$u->views => 0])->limit(10);
+    assert(fails<Sqlite, Update>($l) == 'unsupported by this dialect: UPDATE with LIMIT');
+}
+
+test update_problems
+{
+    $u = UserTable();
+    $p = PostTable();
+    assert(fails<Mysql, Update>(Update($u)->where($u->id == 1)) == 'invalid statement: update without assignments');
+    assert(fails<Mysql, Update>(Update($u)->set([$p->title => 'x'])) == 'invalid statement: a column belongs to another table');
+}
+
+test update_returning
+{
+    $u = UserTable();
+    $q = Update($u)->set([$u->views => 0])->where($u->id == 1)->returning([$u->views]);
+    assert(text<Postgres, Update>($q) == 'UPDATE "users" SET "views" = $1 WHERE "users"."id" = $2 RETURNING "views"');
+}
+
+test delete_where
+{
+    $u = UserTable();
+    $q = Delete(from: $u)->where($u->id in [4, 5]);
+    assert(text<Mysql, Delete>($q) == 'DELETE FROM `users` WHERE `users`.`id` IN (?, ?)');
+    $l = Delete(from: $u)->where($u->active)->order([$u->id->desc()])->limit(1);
+    assert(text<Mysql, Delete>($l) == 'DELETE FROM `users` WHERE `users`.`active` ORDER BY `users`.`id` DESC LIMIT 1');
+    assert(fails<Postgres, Delete>($l) == 'unsupported by this dialect: DELETE with ORDER BY');
+    $r = Delete(from: $u)->where($u->id == 3)->returning([$u->all()]);
+    assert(text<Sqlite, Delete>($r) == 'DELETE FROM "users" WHERE "users"."id" = ? RETURNING *');
+}
+
+test truncate_and_drop
+{
+    $u = UserTable();
+    $p = PostTable();
+    assert(text<Mysql, Truncate>(Truncate($u)) == 'TRUNCATE TABLE `users`');
+    assert(text<Postgres, Truncate>(Truncate($p)) == 'TRUNCATE TABLE "blog"."posts"');
+    assert(text<Sqlite, Truncate>(Truncate($u)) == 'DELETE FROM "users"');
+    assert(text<Mysql, Drop>(Drop($u)) == 'DROP TABLE `users`');
+    assert(text<Postgres, Drop>(Drop($p)->ifExists()) == 'DROP TABLE IF EXISTS "blog"."posts"');
+}
+
+test update_shapes
+{
+    $k = KindTable();
+    string? $none = null;
+    $q = Update($k)->set([$k->i => 1, $k->ni => $k->i, $k->ns => $none, $k->nb => $k->nb, $k->s => fn::lower($k->s)])->where($k->nb);
+    $s = render<Postgres, Update>($q);
+    assert($s->text == 'UPDATE "k" SET "i" = $1, "ni" = "k"."i", "ns" = $2, "nb" = "k"."nb", "s" = LOWER("k"."s") WHERE "k"."nb"');
+    assert(kinds($s) == 'IN');
+}
+
+test update_from_subquery
+{
+    $u = UserTable();
+    $p = PostTable(alias: 'p');
+    Term<int64> $posts = Select(from: $p)->fields([fn::count()])->where($p->userId == $u->id)->scalar<int64>();
+    $q = Update($u)->set([$u->views => $posts])->where($u->active);
+    assert(text<Mysql, Update>($q) == 'UPDATE `users` SET `views` = (SELECT COUNT(*) FROM `blog`.`posts` AS `p` WHERE `p`.`user_id` = `users`.`id`) WHERE `users`.`active`');
+}
+
+test update_more_problems
+{
+    $u = UserTable();
+    assert(fails<Mysql, Update>(Update($u)->set([$u->name => 'a', $u->name => 'b'])) == 'invalid statement: a column is set twice');
+    assert(fails<Mysql, Update>(Update($u)->set([$u->views + 1 => 2])) == 'invalid statement: an assignment target is not a column');
+    // an aliased handle and the plain one name the same table
+    $x = UserTable(alias: 'x');
+    assert(fails<Mysql, Update>(Update($u)->set([$x->name => 'a'])) == '');
+}
+
+test update_with_and_alias
+{
+    $u = UserTable();
+    $x = UserTable(alias: 'x');
+    $top = UserTable(cte: 'top');
+    $q = Update($x)->set([$x->views => 0])->with(name: 'top', Select(from: $u)->fields([$u->id])->where($u->views > 9))->where($x->id->in(Select(from: $top)->fields([$top->id])))->returning([$x->id]);
+    assert(text<Postgres, Update>($q) == 'WITH "top" AS (SELECT "users"."id" FROM "users" WHERE "users"."views" > $1) UPDATE "users" AS "x" SET "views" = $2 WHERE "x"."id" IN (SELECT "top"."id" FROM "top") RETURNING "id"');
+    $r = Update($x)->set([$x->views => 0])->with(recursive: 'top', Select(from: $u));
+    assert(text<Mysql, Update>($r) == 'WITH RECURSIVE `top` AS (SELECT * FROM `users`) UPDATE `users` AS `x` SET `views` = ?');
+    assert(fails<Mysql, Update>($q) == 'unsupported by this dialect: RETURNING');
+    $m = Update($x)->set([$x->views => 0])->order([$x->id->desc()])->limit(2);
+    assert(text<Mysql, Update>($m) == 'UPDATE `users` AS `x` SET `views` = ? ORDER BY `x`.`id` DESC LIMIT 2');
+}
+
+test delete_shapes
+{
+    $u = UserTable();
+    $x = UserTable(alias: 'x');
+    $k = KindTable();
+    assert(text<Postgres, Delete>(Delete(from: $u)) == 'DELETE FROM "users"');
+    assert(text<Postgres, Delete>(Delete(from: $k)->where($k->nb)->where($k->i > 1)) == 'DELETE FROM "k" WHERE "k"."nb" AND "k"."i" > $1');
+    assert(text<Mysql, Delete>(Delete(from: $x)->where($x->id == 1)) == 'DELETE FROM `users` AS `x` WHERE `x`.`id` = ?');
+    $old = UserTable(cte: 'old');
+    $w = Delete(from: $u)->with(name: 'old', Select(from: $u)->fields([$u->id])->where($u->views == 0))->where($u->id->in(Select(from: $old)->fields([$old->id])));
+    assert(text<Postgres, Delete>($w) == 'WITH "old" AS (SELECT "users"."id" FROM "users" WHERE "users"."views" = $1) DELETE FROM "users" WHERE "users"."id" IN (SELECT "old"."id" FROM "old")');
+    $wr = Delete(from: $u)->with(recursive: 'old', Select(from: $u))->where($u->id == 1);
+    assert(text<Sqlite, Delete>($wr) == 'WITH RECURSIVE "old" AS (SELECT * FROM "users") DELETE FROM "users" WHERE "users"."id" = ?');
+    $r = Delete(from: $u)->where($u->id == 1)->returning([$u->id, $u->name->named('n')]);
+    assert(fails<Mysql, Delete>($r) == 'unsupported by this dialect: RETURNING');
+    assert(text<Postgres, Delete>($r) == 'DELETE FROM "users" WHERE "users"."id" = $1 RETURNING "id", "name" AS "n"');
+    assert(fails<Sqlite, Delete>(Delete(from: $u)->order([$u->id])) == 'unsupported by this dialect: DELETE with ORDER BY');
+}
+
+test truncate_and_drop_ignore_alias
+{
+    $x = UserTable(alias: 'x');
+    assert(text<Postgres, Truncate>(Truncate($x)) == 'TRUNCATE TABLE "users"');
+    assert(text<Sqlite, Drop>(Drop($x)->ifExists()) == 'DROP TABLE IF EXISTS "users"');
+    assert(text<Mysql, Drop>(Drop(PostTable())->ifExists()) == 'DROP TABLE IF EXISTS `blog`.`posts`');
+    assert(text<Sqlite, Truncate>(Truncate(PostTable())) == 'DELETE FROM "blog"."posts"');
+}
+
+test update_set_adds_up
+{
+    $u = UserTable();
+    $q = Update($u)->set([$u->views => 0])->set([$u->email => null, $u->name => fn::lower($u->name)])->where($u->id == 1);
+    $s = render<Postgres, Update>($q);
+    assert($s->text == 'UPDATE "users" SET "views" = $1, "email" = $2, "name" = LOWER("users"."name") WHERE "users"."id" = $3');
+    assert(kinds($s) == 'INI');
+    assert(fails<Mysql, Update>(Update($u)->set([$u->views => 0])->set([$u->views => 1])) == 'invalid statement: a column is set twice');
+}
