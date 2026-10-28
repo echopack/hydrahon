@@ -109,6 +109,9 @@ public struct Values
     }
 }
 
+#[docs::groups: ["Constructors", "Rows", "Upsert", "Clauses", "Rendering"]]
+#[docs::see: ["hydrahon::Values", "hydrahon::excluded"]]
+
 /**
  * An INSERT of one or more rows, with an optional upsert and RETURNING.
  *
@@ -130,11 +133,18 @@ public struct Insert
     internal array<Field> $returns = array<Field>();
     internal array<Cte> $ctes = array<Cte>();
 
+    /**
+     * Insert into the table of a handle. INSERT cannot alias its target, so an alias on the
+     * handle is dropped.
+     */
     public constructor(into: Source $source)
     {
         $this->into = $source->table();
     }
 
+    /**
+     * Insert into a plain `Table`.
+     */
     public constructor(into: Table $table)
     {
         $this->into = $table;
@@ -143,6 +153,7 @@ public struct Insert
     /**
      * Add one row. Every row has to set the same columns, in any order.
      */
+    #[docs::group: "Rows"]
     public function row(Values $values) : Insert&
     {
         if ($this->rows->count() == 0) {
@@ -158,6 +169,7 @@ public struct Insert
     /**
      * React to a unique key conflict on any key. Postgres and SQLite need a target to update.
      */
+    #[docs::group: "Upsert"]
     public function conflict() : Insert&
     {
         $this->conflicts = true;
@@ -167,6 +179,7 @@ public struct Insert
     /**
      * React to a conflict on `$target`. MySQL has no conflict target and reacts to any key.
      */
+    #[docs::group: "Upsert"]
     public function conflict(array<Expr> $target) : Insert&
     {
         $this->conflicts = true;
@@ -180,6 +193,7 @@ public struct Insert
      * On conflict, set these columns of the existing row. A value may read the existing row
      * through the columns: `[$u->views => $u->views + 1]`.
      */
+    #[docs::group: "Upsert"]
     public function update(Values $values) : Insert&
     {
         $this->updates->add(mv $values);
@@ -189,6 +203,7 @@ public struct Insert
     /**
      * On conflict, overwrite `$columns` with the values this insert tried to write.
      */
+    #[docs::group: "Upsert"]
     public function update(inserted: array<Expr> $columns) : Insert&
     {
         foreach ($columns as const &$c) {
@@ -200,30 +215,52 @@ public struct Insert
     /**
      * On conflict, keep the existing row and skip this one.
      */
+    #[docs::group: "Upsert"]
     public function ignore() : Insert&
     {
         $this->skip = true;
         return $this;
     }
 
+    /**
+     * Hand back `$fields` of every row this statement wrote, as `RETURNING`. Postgres, and SQLite
+     * from 3.35; MySQL refuses it. The columns are written bare, without a table.
+     */
+    #[docs::group: "Clauses"]
     public function returning(array<Field> $fields) : Insert&
     {
         adopt($this->returns, mv $fields);
         return $this;
     }
 
+    /**
+     * Start the statement with `WITH $name AS ($query)`. Read it through a handle built with
+     * `cte: $name`. MySQL and MariaDB refuse WITH in front of an INSERT.
+     */
+    #[docs::group: "Clauses"]
     public function with(name: string $name, Select $query) : Insert&
     {
         $this->ctes[] = Cte($name, false, rc<Select>(mv $query));
         return $this;
     }
 
+    /**
+     * `WITH RECURSIVE`: like `with(name:)`, but `$query` may read its own name, usually as a
+     * seed row unioned with a step.
+     */
+    #[docs::group: "Clauses"]
     public function with(recursive: string $name, Select $query) : Insert&
     {
         $this->ctes[] = Cte($name, true, rc<Select>(mv $query));
         return $this;
     }
 
+    /**
+     * Render this statement with a configured dialect, such as `hydrahon::Mysql($mariadb: true)`
+     * or `hydrahon::Sqlite(3038000)`.
+     */
+    #[docs::group: "Rendering"]
+    #[docs::outcomes: { ok: "The SQL text and its params, in placeholder order.", fail: "unsupported when this dialect cannot say it, invalid when no dialect can. The first problem wins." }]
     public const function sql<D : Dialect>(const D& $dialect) : result<Sql, Error>
     {
         $r = Renderer<D>($dialect);
@@ -231,6 +268,12 @@ public struct Insert
         return $r->finish();
     }
 
+    /**
+     * Render this statement for the dialect `D` with its defaults:
+     * `$q->sql<hydrahon::Postgres>()`.
+     */
+    #[docs::group: "Rendering"]
+    #[docs::outcomes: { ok: "The SQL text and its params, in placeholder order.", fail: "unsupported when this dialect cannot say it, invalid when no dialect can. The first problem wins." }]
     public const function sql<D : Dialect>() : result<Sql, Error>
     {
         D $dialect = D();

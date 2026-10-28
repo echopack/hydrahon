@@ -1,0 +1,48 @@
+/*
+ * hydrahon's docs, built by ecodoc. From the repo root, `ecodoc build`
+ * writes the site to docs/dist.
+ */
+
+#[module: "docs"]
+
+#[docs::title: "hydrahon"]
+#[docs::description: "Typed SQL for Echo. A typo in a column is a compile error, not a 3am page."]
+#[docs::repo: "https://github.com/echopack/hydrahon"]
+#[docs::edit: "https://github.com/echopack/hydrahon/edit/main/docs/{path}"]
+#[docs::source: "https://github.com/echopack/hydrahon/blob/main/"]
+#[docs::url: "https://echopack.github.io/hydrahon"]
+#[docs::nav: [
+    { text: "Guide", link: "/guide/" },
+    { text: "API", link: "/api/" },
+    { text: "Echo", link: "https://echoc.dev" }
+]]
+#[docs::sidebar: [{ base: "/guide/", items: [
+    { text: "Start", items: [
+        { text: "Getting started", link: "/guide/" },
+        { text: "Table handles", link: "/guide/tables" },
+        { text: "hydragen", link: "/guide/hydragen" }
+    ] },
+    { text: "Reading", items: [
+        { text: "Select", link: "/guide/select" },
+        { text: "Conditions", link: "/guide/conditions" },
+        { text: "Arithmetic and functions", link: "/guide/expressions" },
+        { text: "Subqueries, unions and CTEs", link: "/guide/subqueries" },
+        { text: "Raw SQL", link: "/guide/raw" }
+    ] },
+    { text: "Writing", items: [
+        { text: "Insert and upsert", link: "/guide/insert" },
+        { text: "Update, delete, truncate", link: "/guide/update" }
+    ] },
+    { text: "Rendering", items: [
+        { text: "Dialects", link: "/guide/dialects" },
+        { text: "Running statements", link: "/guide/drivers" },
+        { text: "Values and types", link: "/guide/values" },
+        { text: "Errors", link: "/guide/errors" }
+    ] },
+    { text: "Project", items: [
+        { text: "Coming from PHP Hydrahon", link: "/guide/php" },
+        { text: "What isn't here", link: "/guide/limits" }
+    ] }
+] }]]
+#[docs::api: { manifest: "../module.eco", visibility: public, autolink: true }]
+#[docs::footer: { message: "MIT. Built with ecodoc." }]

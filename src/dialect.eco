@@ -202,6 +202,9 @@ public interface Dialect
      */
     const function supports(Feature $f) : bool;
 
+    /**
+     * How this dialect spells an upsert.
+     */
     const function upsert() : UpsertStyle;
 
     /**
@@ -229,6 +232,10 @@ public interface Dialect
      */
     const function symbol(Binary $op, str::text& $out) : void;
 
+    /**
+     * How raw SQL is lexed, so a `?` inside a string or a comment is not taken for a
+     * placeholder.
+     */
     const function syntax() : Syntax;
 }
 

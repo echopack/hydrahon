@@ -44,6 +44,10 @@ in_dir() {
 }
 
 echo "building hydragen"
+if [ ! -d cli/vendor ] && ! in_dir cli epm install >"$work/build.log" 2>&1; then
+    cat "$work/build.log"
+    exit 1
+fi
 if ! in_dir cli "$ECHOC" build >"$work/build.log" 2>&1; then
     cat "$work/build.log"
     exit 1

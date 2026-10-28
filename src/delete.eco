@@ -1,5 +1,7 @@
 namespace hydrahon;
 
+#[docs::groups: ["Constructors", "Filtering", "Clauses", "Rendering"]]
+
 /**
  * A DELETE from one table. Without a condition it deletes every row, as SQL does; an empty `in`
  * list matches nothing, so it never widens a delete by accident.
@@ -13,11 +15,17 @@ public struct Delete
     internal array<Field> $returns = array<Field>();
     internal array<Cte> $ctes = array<Cte>();
 
+    /**
+     * Delete from the table of a handle. An alias on the handle stays.
+     */
     public constructor(from: Source $source)
     {
         $this->table = $source->table();
     }
 
+    /**
+     * Delete from a plain `Table`.
+     */
     public constructor(from: Table $table)
     {
         $this->table = $table;
@@ -26,12 +34,18 @@ public struct Delete
     /**
      * Add a condition. Several calls must all hold; write `||` for either.
      */
+    #[docs::group: "Filtering"]
     public function where(Term<bool> $condition) : Delete&
     {
         condition($this->wheres, own($condition->node));
         return $this;
     }
 
+    /**
+     * A condition that can be NULL, such as a nullable `bool` column. A row where it is NULL is
+     * filtered out, the same as false, which is what SQL does.
+     */
+    #[docs::group: "Filtering"]
     public function where(Term<bool?> $condition) : Delete&
     {
         condition($this->wheres, own($condition->node));
@@ -41,6 +55,7 @@ public struct Delete
     /**
      * The order rows are deleted in. MySQL only.
      */
+    #[docs::group: "Filtering"]
     public function order(array<Order> $by) : Delete&
     {
         adopt($this->orders, mv $by);
@@ -50,30 +65,52 @@ public struct Delete
     /**
      * Delete at most `$rows` rows. MySQL only.
      */
+    #[docs::group: "Filtering"]
     public function limit(uint64 $rows) : Delete&
     {
         $this->take = $rows;
         return $this;
     }
 
+    /**
+     * Hand back `$fields` of every row this statement deleted, as `RETURNING`. Postgres, and SQLite
+     * from 3.35; MySQL refuses it. The columns are written bare, without a table.
+     */
+    #[docs::group: "Clauses"]
     public function returning(array<Field> $fields) : Delete&
     {
         adopt($this->returns, mv $fields);
         return $this;
     }
 
+    /**
+     * Start the statement with `WITH $name AS ($query)`. Read it through a handle built with
+     * `cte: $name`. MariaDB refuses WITH in front of a DELETE.
+     */
+    #[docs::group: "Clauses"]
     public function with(name: string $name, Select $query) : Delete&
     {
         $this->ctes[] = Cte($name, false, rc<Select>(mv $query));
         return $this;
     }
 
+    /**
+     * `WITH RECURSIVE`: like `with(name:)`, but `$query` may read its own name, usually as a
+     * seed row unioned with a step.
+     */
+    #[docs::group: "Clauses"]
     public function with(recursive: string $name, Select $query) : Delete&
     {
         $this->ctes[] = Cte($name, true, rc<Select>(mv $query));
         return $this;
     }
 
+    /**
+     * Render this statement with a configured dialect, such as `hydrahon::Mysql($mariadb: true)`
+     * or `hydrahon::Sqlite(3038000)`.
+     */
+    #[docs::group: "Rendering"]
+    #[docs::outcomes: { ok: "The SQL text and its params, in placeholder order.", fail: "unsupported when this dialect cannot say it, invalid when no dialect can. The first problem wins." }]
     public const function sql<D : Dialect>(const D& $dialect) : result<Sql, Error>
     {
         $r = Renderer<D>($dialect);
@@ -81,6 +118,12 @@ public struct Delete
         return $r->finish();
     }
 
+    /**
+     * Render this statement for the dialect `D` with its defaults:
+     * `$q->sql<hydrahon::Postgres>()`.
+     */
+    #[docs::group: "Rendering"]
+    #[docs::outcomes: { ok: "The SQL text and its params, in placeholder order.", fail: "unsupported when this dialect cannot say it, invalid when no dialect can. The first problem wins." }]
     public const function sql<D : Dialect>() : result<Sql, Error>
     {
         D $dialect = D();

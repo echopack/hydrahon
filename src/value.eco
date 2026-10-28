@@ -6,6 +6,9 @@ namespace hydrahon;
  */
 public struct Decimal
 {
+    /**
+     * The number as the server should read it: `'19.90'`, `'-0.5'`, `'1e3'`.
+     */
     public string $text;
 
     /**
@@ -38,6 +41,9 @@ public struct Decimal
  */
 public struct Bytes
 {
+    /**
+     * The raw bytes, in a string because that is where Echo keeps bytes.
+     */
     public string $data;
 }
 
@@ -46,8 +52,19 @@ public struct Bytes
  */
 public struct Date
 {
+    /**
+     * The year, as written: 2024.
+     */
     public uint16 $year = 0;
+
+    /**
+     * The month, 1 to 12.
+     */
     public uint8 $month = 0;
+
+    /**
+     * The day of the month, 1 to 31.
+     */
     public uint8 $day = 0;
 }
 
@@ -56,14 +73,45 @@ public struct Date
  */
 public struct DateTime
 {
+    /**
+     * The year, as written: 2024.
+     */
     public uint16 $year = 0;
+
+    /**
+     * The month, 1 to 12.
+     */
     public uint8 $month = 0;
+
+    /**
+     * The day of the month, 1 to 31.
+     */
     public uint8 $day = 0;
+
+    /**
+     * The hour, 0 to 23.
+     */
     public uint8 $hour = 0;
+
+    /**
+     * The minute, 0 to 59.
+     */
     public uint8 $minute = 0;
+
+    /**
+     * The second, 0 to 59.
+     */
     public uint8 $second = 0;
+
+    /**
+     * The microsecond, 0 to 999999.
+     */
     public uint32 $micro = 0;
 
+    /**
+     * A date and time from its parts, largest first. Leave out what you do not need:
+     * `DateTime(2024, 1, 31)` is midnight.
+     */
     public constructor(uint16 $year = 0, uint8 $month = 0, uint8 $day = 0, uint8 $hour = 0, uint8 $minute = 0, uint8 $second = 0, uint32 $micro = 0)
     {
         $this->year = $year;
@@ -123,10 +171,29 @@ public struct DateTime
  */
 public struct Time
 {
+    /**
+     * Whether this is a span backwards, `-01:30:00`. MySQL allows it, a time of day never is.
+     */
     public bool $negative = false;
+
+    /**
+     * The hours. Past 23 only as a span, which MySQL takes up to 838.
+     */
     public uint32 $hours = 0;
+
+    /**
+     * The minute, 0 to 59.
+     */
     public uint8 $minute = 0;
+
+    /**
+     * The second, 0 to 59.
+     */
     public uint8 $second = 0;
+
+    /**
+     * The microsecond, 0 to 999999.
+     */
     public uint32 $micro = 0;
 }
 
@@ -148,6 +215,10 @@ public enum Value
     case datetime(DateTime $v);
     case time(Time $v);
 
+    /**
+     * A literal becomes a `Value` on its own: `Value $v = 42;`. `null` of a nullable kind becomes
+     * `none`.
+     */
     #[implicit]
     public static function from(bool $v) : Value
     {

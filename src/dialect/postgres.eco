@@ -6,21 +6,25 @@ namespace hydrahon;
  */
 public struct Postgres : Dialect
 {
+    #[docs::hidden]
     public const function quote(const string& $ident, str::text& $out) : void
     {
         quoteWith($ident, 34, $out);
     }
 
+    #[docs::hidden]
     public const function placeholder(usize $n, str::text& $out) : void
     {
         $out->push(36);
         digits($n as uint64, $out);
     }
 
+    #[docs::hidden]
     public const function unlimited(str::text& $out) : void
     {
     }
 
+    #[docs::hidden]
     public const function supports(Feature $f) : bool
     {
         return match ($f) {
@@ -32,36 +36,43 @@ public struct Postgres : Dialect
         };
     }
 
+    #[docs::hidden]
     public const function upsert() : UpsertStyle
     {
         return .onConflict;
     }
 
+    #[docs::hidden]
     public const function excluded(const string& $column, str::text& $out) : void
     {
         $out->append('EXCLUDED.');
         $this->quote($column, $out);
     }
 
+    #[docs::hidden]
     public const function incoming(str::text& $out) : void
     {
     }
 
+    #[docs::hidden]
     public const function truncate(str::text& $out) : void
     {
         $out->append('TRUNCATE TABLE ');
     }
 
+    #[docs::hidden]
     public const function call(Function $fn, str::text& $out) : void
     {
         standardName($fn, $out);
     }
 
+    #[docs::hidden]
     public const function symbol(Binary $op, str::text& $out) : void
     {
         $out->append($op->symbol());
     }
 
+    #[docs::hidden]
     public const function syntax() : Syntax
     {
         return Syntax($dollarQuotes: true, $likeEscape: true);

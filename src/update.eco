@@ -1,5 +1,8 @@
 namespace hydrahon;
 
+#[docs::groups: ["Constructors", "Setting", "Filtering", "Clauses", "Rendering"]]
+#[docs::see: ["hydrahon::Values"]]
+
 /**
  * An UPDATE of one table.
  *
@@ -19,11 +22,18 @@ public struct Update
     internal array<Field> $returns = array<Field>();
     internal array<Cte> $ctes = array<Cte>();
 
+    /**
+     * Update the table of a handle. No label, unlike `Select(from:)`: an UPDATE has exactly one
+     * table, so there is nothing to tell apart. An alias on the handle stays.
+     */
     public constructor(Source $source)
     {
         $this->table = $source->table();
     }
 
+    /**
+     * Update a plain `Table`.
+     */
     public constructor(Table $table)
     {
         $this->table = $table;
@@ -33,6 +43,7 @@ public struct Update
      * Set columns. A value may read the row being updated through the columns:
      * `[$u->views => $u->views + 1]`. Several calls add up.
      */
+    #[docs::group: "Setting"]
     public function set(Values $values) : Update&
     {
         $this->sets->add(mv $values);
@@ -42,12 +53,18 @@ public struct Update
     /**
      * Add a condition. Several calls must all hold; write `||` for either.
      */
+    #[docs::group: "Filtering"]
     public function where(Term<bool> $condition) : Update&
     {
         condition($this->wheres, own($condition->node));
         return $this;
     }
 
+    /**
+     * A condition that can be NULL, such as a nullable `bool` column. A row where it is NULL is
+     * filtered out, the same as false, which is what SQL does.
+     */
+    #[docs::group: "Filtering"]
     public function where(Term<bool?> $condition) : Update&
     {
         condition($this->wheres, own($condition->node));
@@ -57,6 +74,7 @@ public struct Update
     /**
      * The order rows are updated in. MySQL only.
      */
+    #[docs::group: "Filtering"]
     public function order(array<Order> $by) : Update&
     {
         adopt($this->orders, mv $by);
@@ -66,30 +84,52 @@ public struct Update
     /**
      * Update at most `$rows` rows. MySQL only.
      */
+    #[docs::group: "Filtering"]
     public function limit(uint64 $rows) : Update&
     {
         $this->take = $rows;
         return $this;
     }
 
+    /**
+     * Hand back `$fields` of every row this statement changed, as `RETURNING`. Postgres, and SQLite
+     * from 3.35; MySQL refuses it. The columns are written bare, without a table.
+     */
+    #[docs::group: "Clauses"]
     public function returning(array<Field> $fields) : Update&
     {
         adopt($this->returns, mv $fields);
         return $this;
     }
 
+    /**
+     * Start the statement with `WITH $name AS ($query)`. Read it through a handle built with
+     * `cte: $name`. MariaDB refuses WITH in front of an UPDATE.
+     */
+    #[docs::group: "Clauses"]
     public function with(name: string $name, Select $query) : Update&
     {
         $this->ctes[] = Cte($name, false, rc<Select>(mv $query));
         return $this;
     }
 
+    /**
+     * `WITH RECURSIVE`: like `with(name:)`, but `$query` may read its own name, usually as a
+     * seed row unioned with a step.
+     */
+    #[docs::group: "Clauses"]
     public function with(recursive: string $name, Select $query) : Update&
     {
         $this->ctes[] = Cte($name, true, rc<Select>(mv $query));
         return $this;
     }
 
+    /**
+     * Render this statement with a configured dialect, such as `hydrahon::Mysql($mariadb: true)`
+     * or `hydrahon::Sqlite(3038000)`.
+     */
+    #[docs::group: "Rendering"]
+    #[docs::outcomes: { ok: "The SQL text and its params, in placeholder order.", fail: "unsupported when this dialect cannot say it, invalid when no dialect can. The first problem wins." }]
     public const function sql<D : Dialect>(const D& $dialect) : result<Sql, Error>
     {
         $r = Renderer<D>($dialect);
@@ -97,6 +137,12 @@ public struct Update
         return $r->finish();
     }
 
+    /**
+     * Render this statement for the dialect `D` with its defaults:
+     * `$q->sql<hydrahon::Postgres>()`.
+     */
+    #[docs::group: "Rendering"]
+    #[docs::outcomes: { ok: "The SQL text and its params, in placeholder order.", fail: "unsupported when this dialect cannot say it, invalid when no dialect can. The first problem wins." }]
     public const function sql<D : Dialect>() : result<Sql, Error>
     {
         D $dialect = D();

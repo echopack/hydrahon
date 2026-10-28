@@ -9,6 +9,10 @@ public struct Table : Source
 {
     internal Owner $owner;
 
+    /**
+     * The table `$name`, optionally in `$schema`. Columns come from `column<T>()`; a generated
+     * handle does this for you.
+     */
     public constructor(name: string $name, string? $schema = null)
     {
         string? $s = $schema;
@@ -40,6 +44,9 @@ public struct Table : Source
         return $this->owner->table;
     }
 
+    /**
+     * The schema the table lives in, or null for the connection's default.
+     */
     public const function schema() : string?
     {
         return $this->owner->schema;

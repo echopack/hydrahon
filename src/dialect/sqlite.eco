@@ -6,23 +6,31 @@ namespace hydrahon;
  */
 public struct Sqlite : Dialect
 {
+    /**
+     * `sqlite3_libversion_number()`, such as 3045000 for 3.45.0. Features newer than this are
+     * refused at render time instead of at the server.
+     */
     public uint32 $version = 3045000;
 
+    #[docs::hidden]
     public const function quote(const string& $ident, str::text& $out) : void
     {
         quoteWith($ident, 34, $out);
     }
 
+    #[docs::hidden]
     public const function placeholder(usize $n, str::text& $out) : void
     {
         $out->push(63);
     }
 
+    #[docs::hidden]
     public const function unlimited(str::text& $out) : void
     {
         $out->append(' LIMIT -1');
     }
 
+    #[docs::hidden]
     public const function supports(Feature $f) : bool
     {
         return match ($f) {
@@ -42,27 +50,32 @@ public struct Sqlite : Dialect
         };
     }
 
+    #[docs::hidden]
     public const function upsert() : UpsertStyle
     {
         return .onConflict;
     }
 
+    #[docs::hidden]
     public const function excluded(const string& $column, str::text& $out) : void
     {
         $out->append('excluded.');
         $this->quote($column, $out);
     }
 
+    #[docs::hidden]
     public const function incoming(str::text& $out) : void
     {
     }
 
+    #[docs::hidden]
     public const function truncate(str::text& $out) : void
     {
         // an unconditional delete is what sqlite's truncate optimization runs
         $out->append('DELETE FROM ');
     }
 
+    #[docs::hidden]
     public const function call(Function $fn, str::text& $out) : void
     {
         if ($fn == Function::length) {
@@ -72,11 +85,13 @@ public struct Sqlite : Dialect
         standardName($fn, $out);
     }
 
+    #[docs::hidden]
     public const function symbol(Binary $op, str::text& $out) : void
     {
         $out->append($op->symbol());
     }
 
+    #[docs::hidden]
     public const function syntax() : Syntax
     {
         // no escape character in LIKE unless ESCAPE names one

@@ -62,6 +62,9 @@ internal struct Branch
     internal rc<Select> $query;
 }
 
+#[docs::groups: ["Constructors", "Reading", "Joins", "Filtering", "Shaping", "Combining", "Subqueries", "Rendering"]]
+#[docs::see: ["hydrahon::Term", "hydrahon::Cond", "hydrahon::Sql"]]
+
 /**
  * A SELECT. Chain methods change this statement and hand it back; copy it to branch off a
  * variant, the copy is independent. ORDER BY, LIMIT and OFFSET apply to the whole statement,
@@ -95,12 +98,18 @@ public struct Select
     internal array<Branch> $branches = array<Branch>();
     internal array<Cte> $ctes = array<Cte>();
 
+    /**
+     * Read from a table handle, such as a generated `UserTable` or one built with an alias.
+     */
     public constructor(from: Source $source)
     {
         $this->from = $source->table();
         $this->inner = null;
     }
 
+    /**
+     * Read from a plain `Table`, for code that names its tables without hydragen.
+     */
     public constructor(from: Table $table)
     {
         $this->from = $table;
@@ -129,42 +138,69 @@ public struct Select
     /**
      * Add to the select list. Without fields a select reads `*`.
      */
+    #[docs::group: "Reading"]
     public function fields(array<Field> $fields) : Select&
     {
         adopt($this->fields, mv $fields);
         return $this;
     }
 
+    /**
+     * Drop duplicate rows: `SELECT DISTINCT`.
+     */
+    #[docs::group: "Reading"]
     public function distinct() : Select&
     {
         $this->unique = true;
         return $this;
     }
 
+    /**
+     * Join `$source` and keep the rows where `$on` holds.
+     */
+    #[docs::group: "Joins"]
     public function join<S : Source>(inner: S $source, on: Term<bool> $on) : Select&
     {
         $this->attach($source->table(), .inner, own($on->node));
         return $this;
     }
 
+    /**
+     * Join `$source` and keep every row on the left. Where nothing matched, the columns of
+     * `$source` read NULL.
+     */
+    #[docs::group: "Joins"]
     public function join<S : Source>(left: S $source, on: Term<bool> $on) : Select&
     {
         $this->attach($source->table(), .left, own($on->node));
         return $this;
     }
 
+    /**
+     * Join `$source` and keep every row of `$source`. SQLite needs 3.39.
+     */
+    #[docs::group: "Joins"]
     public function join<S : Source>(right: S $source, on: Term<bool> $on) : Select&
     {
         $this->attach($source->table(), .right, own($on->node));
         return $this;
     }
 
+    /**
+     * Join `$source` and keep the unmatched rows of both sides. MySQL has no FULL JOIN and
+     * refuses it; SQLite needs 3.39.
+     */
+    #[docs::group: "Joins"]
     public function join<S : Source>(full: S $source, on: Term<bool> $on) : Select&
     {
         $this->attach($source->table(), .full, own($on->node));
         return $this;
     }
 
+    /**
+     * Every row paired with every row of `$source`, no condition.
+     */
+    #[docs::group: "Joins"]
     public function join<S : Source>(cross: S $source) : Select&
     {
         $this->attach($source->table(), .cross, .hole);
@@ -174,18 +210,29 @@ public struct Select
     /**
      * Add a condition. Several calls must all hold; write `||` for either.
      */
+    #[docs::group: "Filtering"]
     public function where(Term<bool> $condition) : Select&
     {
         condition($this->wheres, own($condition->node));
         return $this;
     }
 
+    /**
+     * A condition that can be NULL, such as a nullable `bool` column. A row where it is NULL is
+     * filtered out, the same as false, which is what SQL does.
+     */
+    #[docs::group: "Filtering"]
     public function where(Term<bool?> $condition) : Select&
     {
         condition($this->wheres, own($condition->node));
         return $this;
     }
 
+    /**
+     * Group the rows by `$by`. The list mixes types: `group([$u->id, $u->name])`. Several calls
+     * add up.
+     */
+    #[docs::group: "Filtering"]
     public function group(array<Expr> $by) : Select&
     {
         if ($this->groups->count() == 0) {
@@ -200,12 +247,18 @@ public struct Select
     /**
      * Add a condition on the groups. Several calls must all hold.
      */
+    #[docs::group: "Filtering"]
     public function having(Term<bool> $condition) : Select&
     {
         condition($this->havings, own($condition->node));
         return $this;
     }
 
+    /**
+     * Sort by `$by`. A bare term sorts ascending; `->desc()` on it turns that around. Several
+     * calls add up.
+     */
+    #[docs::group: "Shaping"]
     public function order(array<Order> $by) : Select&
     {
         adopt($this->orders, mv $by);
@@ -215,12 +268,17 @@ public struct Select
     /**
      * At most `$rows` rows. `limit(0)` asks for none.
      */
+    #[docs::group: "Shaping"]
     public function limit(uint64 $rows) : Select&
     {
         $this->take = $rows;
         return $this;
     }
 
+    /**
+     * Skip `$rows` rows. Without a limit, each dialect gets its own way of saying "no limit".
+     */
+    #[docs::group: "Shaping"]
     public function offset(uint64 $rows) : Select&
     {
         $this->skip = $rows;
@@ -230,6 +288,7 @@ public struct Select
     /**
      * The page at `$index`, counting from 0, of `$size` rows each.
      */
+    #[docs::group: "Shaping"]
     public function page(uint64 $index, uint64 $size) : Select&
     {
         $this->take = $size;
@@ -245,6 +304,7 @@ public struct Select
     /**
      * Append `$query` as a UNION branch, which drops duplicate rows.
      */
+    #[docs::group: "Combining"]
     public function union(Select $query) : Select&
     {
         $this->branches[] = Branch(.union, rc<Select>(mv $query));
@@ -254,6 +314,7 @@ public struct Select
     /**
      * Append `$query` as a UNION ALL branch, which keeps every row.
      */
+    #[docs::group: "Combining"]
     public function union(all: Select $query) : Select&
     {
         $this->branches[] = Branch(.unionAll, rc<Select>(mv $query));
@@ -264,12 +325,18 @@ public struct Select
      * Start the statement with `WITH $name AS ($query)`. Read it through a handle built with
      * `cte: $name`.
      */
+    #[docs::group: "Combining"]
     public function with(name: string $name, Select $query) : Select&
     {
         $this->ctes[] = Cte($name, false, rc<Select>(mv $query));
         return $this;
     }
 
+    /**
+     * `WITH RECURSIVE`: like `with(name:)`, but `$query` may read its own name, usually as a
+     * seed row unioned with a step.
+     */
+    #[docs::group: "Combining"]
     public function with(recursive: string $name, Select $query) : Select&
     {
         $this->ctes[] = Cte($name, true, rc<Select>(mv $query));
@@ -282,6 +349,7 @@ public struct Select
      * LIMIT, OFFSET or unions count over this statement as a derived table. MySQL cannot count
      * DISTINCT or UNION rows of `*` across a join that way; list the fields instead.
      */
+    #[docs::group: "Subqueries"]
     public const function count() : Select
     {
         Select $copy = $this;
@@ -315,6 +383,7 @@ public struct Select
     /**
      * Whether this query yields any row, as a condition or a field.
      */
+    #[docs::group: "Subqueries"]
     public const function exists() : Term<bool>
     {
         return Term<bool>(.exists(rc<Select>($this)));
@@ -323,11 +392,18 @@ public struct Select
     /**
      * This query as a single value, for a query that selects one column and at most one row.
      */
+    #[docs::group: "Subqueries"]
     public const function scalar<T>() : Term<T>
     {
         return Term<T>(.scalar(rc<Select>($this)));
     }
 
+    /**
+     * Render this statement with a configured dialect, such as `hydrahon::Mysql($mariadb: true)`
+     * or `hydrahon::Sqlite(3038000)`.
+     */
+    #[docs::group: "Rendering"]
+    #[docs::outcomes: { ok: "The SQL text and its params, in placeholder order.", fail: "unsupported when this dialect cannot say it, invalid when no dialect can. The first problem wins." }]
     public const function sql<D : Dialect>(const D& $dialect) : result<Sql, Error>
     {
         $r = Renderer<D>($dialect);
@@ -335,6 +411,12 @@ public struct Select
         return $r->finish();
     }
 
+    /**
+     * Render this statement for the dialect `D` with its defaults:
+     * `$q->sql<hydrahon::Postgres>()`.
+     */
+    #[docs::group: "Rendering"]
+    #[docs::outcomes: { ok: "The SQL text and its params, in placeholder order.", fail: "unsupported when this dialect cannot say it, invalid when no dialect can. The first problem wins." }]
     public const function sql<D : Dialect>() : result<Sql, Error>
     {
         D $dialect = D();

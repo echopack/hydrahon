@@ -34,6 +34,10 @@ public function now() : hydrahon::Term<hydrahon::DateTime>
     return hydrahon::Term<hydrahon::DateTime>(hydrahon::call(.now, array<hydrahon::Node>()));
 }
 
+/**
+ * `SUM(x)`. Nullable whatever the column, because the sum of no rows is NULL, not 0.
+ * Wrap it in `coalesce` when you want the 0.
+ */
 public function sum(hydrahon::Term<int64> $x) : hydrahon::Term<int64?>
 {
     return hydrahon::Term<int64?>(hydrahon::call(.sum, [hydrahon::own($x->node)]));
@@ -44,6 +48,10 @@ public function sum(hydrahon::Term<int64?> $x) : hydrahon::Term<int64?>
     return hydrahon::Term<int64?>(hydrahon::call(.sum, [hydrahon::own($x->node)]));
 }
 
+/**
+ * `AVG(x)`. An integer or float column averages to `float64?`, a `Decimal` column to
+ * `Decimal?`. NULL when no row has a value.
+ */
 public function avg(hydrahon::Term<int64> $x) : hydrahon::Term<float64?>
 {
     return hydrahon::Term<float64?>(hydrahon::call(.avg, [hydrahon::own($x->node)]));
@@ -54,6 +62,9 @@ public function avg(hydrahon::Term<int64?> $x) : hydrahon::Term<float64?>
     return hydrahon::Term<float64?>(hydrahon::call(.avg, [hydrahon::own($x->node)]));
 }
 
+/**
+ * `ABS(x)`, for the signed kinds. Keeps the nullability of `$x`.
+ */
 public function abs(hydrahon::Term<int64> $x) : hydrahon::Term<int64>
 {
     return hydrahon::Term<int64>(hydrahon::call(.abs, [hydrahon::own($x->node)]));
@@ -64,6 +75,10 @@ public function abs(hydrahon::Term<int64?> $x) : hydrahon::Term<int64?>
     return hydrahon::Term<int64?>(hydrahon::call(.abs, [hydrahon::own($x->node)]));
 }
 
+/**
+ * `MIN(x)`. Nullable, because no rows have no minimum. Every ordered kind except `Bytes`,
+ * which Postgres cannot take a minimum of.
+ */
 public function min(hydrahon::Term<int64> $x) : hydrahon::Term<int64?>
 {
     return hydrahon::Term<int64?>(hydrahon::call(.min, [hydrahon::own($x->node)]));
@@ -74,6 +89,10 @@ public function min(hydrahon::Term<int64?> $x) : hydrahon::Term<int64?>
     return hydrahon::Term<int64?>(hydrahon::call(.min, [hydrahon::own($x->node)]));
 }
 
+/**
+ * `MAX(x)`. Nullable, because no rows have no maximum. Every ordered kind except `Bytes`,
+ * which Postgres cannot take a maximum of.
+ */
 public function max(hydrahon::Term<int64> $x) : hydrahon::Term<int64?>
 {
     return hydrahon::Term<int64?>(hydrahon::call(.max, [hydrahon::own($x->node)]));
@@ -84,6 +103,11 @@ public function max(hydrahon::Term<int64?> $x) : hydrahon::Term<int64?>
     return hydrahon::Term<int64?>(hydrahon::call(.max, [hydrahon::own($x->node)]));
 }
 
+/**
+ * `COALESCE(x, fallback)`: `$x`, or `$fallback` where it is NULL. A plain value or a
+ * non-null term as the fallback makes the result non-null; a nullable fallback keeps it
+ * nullable.
+ */
 public function coalesce(hydrahon::Term<int64?> $x, int64 $fallback) : hydrahon::Term<int64>
 {
     hydrahon::Value $v = $fallback;
@@ -324,6 +348,9 @@ public function max(hydrahon::Term<string?> $x) : hydrahon::Term<string?>
     return hydrahon::Term<string?>(hydrahon::call(.max, [hydrahon::own($x->node)]));
 }
 
+/**
+ * `LOWER(x)`. Keeps the nullability of `$x`.
+ */
 public function lower(hydrahon::Term<string> $x) : hydrahon::Term<string>
 {
     return hydrahon::Term<string>(hydrahon::call(.lower, [hydrahon::own($x->node)]));
@@ -334,6 +361,9 @@ public function lower(hydrahon::Term<string?> $x) : hydrahon::Term<string?>
     return hydrahon::Term<string?>(hydrahon::call(.lower, [hydrahon::own($x->node)]));
 }
 
+/**
+ * `UPPER(x)`. Keeps the nullability of `$x`.
+ */
 public function upper(hydrahon::Term<string> $x) : hydrahon::Term<string>
 {
     return hydrahon::Term<string>(hydrahon::call(.upper, [hydrahon::own($x->node)]));
@@ -344,6 +374,10 @@ public function upper(hydrahon::Term<string?> $x) : hydrahon::Term<string?>
     return hydrahon::Term<string?>(hydrahon::call(.upper, [hydrahon::own($x->node)]));
 }
 
+/**
+ * The length of `$x` in characters, not bytes: `CHAR_LENGTH` on MySQL and Postgres,
+ * `LENGTH` on SQLite.
+ */
 public function length(hydrahon::Term<string> $x) : hydrahon::Term<int64>
 {
     return hydrahon::Term<int64>(hydrahon::call(.length, [hydrahon::own($x->node)]));

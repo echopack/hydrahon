@@ -41,9 +41,9 @@ jobs:
 
       - uses: echolang/setup-echo@v1
 
-      # cli/module.eco depends on ../../libjson, a checkout next to this one
-      - name: Fetch libjson
-        run: git clone --depth 1 --branch v0.1.3 https://github.com/echolang/libjson.git ../libjson
+      - name: Vendor libjson
+        working-directory: cli
+        run: epm install
 
       - name: Test
         working-directory: cli

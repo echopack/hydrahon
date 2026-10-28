@@ -8,6 +8,10 @@ namespace hydrahon;
  */
 public struct Mysql : Dialect
 {
+    /**
+     * Refer to the incoming row as `AS new ... new.col` instead of `VALUES(col)`. MySQL 8.0.19
+     * and later.
+     */
     public bool $rowAlias = false;
 
     /**
@@ -15,21 +19,25 @@ public struct Mysql : Dialect
      */
     public bool $mariadb = false;
 
+    #[docs::hidden]
     public const function quote(const string& $ident, str::text& $out) : void
     {
         quoteWith($ident, 96, $out);
     }
 
+    #[docs::hidden]
     public const function placeholder(usize $n, str::text& $out) : void
     {
         $out->push(63);
     }
 
+    #[docs::hidden]
     public const function unlimited(str::text& $out) : void
     {
         $out->append(' LIMIT 18446744073709551615');
     }
 
+    #[docs::hidden]
     public const function supports(Feature $f) : bool
     {
         return match ($f) {
@@ -45,11 +53,13 @@ public struct Mysql : Dialect
         };
     }
 
+    #[docs::hidden]
     public const function upsert() : UpsertStyle
     {
         return .duplicateKey;
     }
 
+    #[docs::hidden]
     public const function excluded(const string& $column, str::text& $out) : void
     {
         if ($this->aliased()) {
@@ -62,6 +72,7 @@ public struct Mysql : Dialect
         $out->push(41);
     }
 
+    #[docs::hidden]
     public const function incoming(str::text& $out) : void
     {
         if ($this->aliased()) {
@@ -69,16 +80,19 @@ public struct Mysql : Dialect
         }
     }
 
+    #[docs::hidden]
     public const function truncate(str::text& $out) : void
     {
         $out->append('TRUNCATE TABLE ');
     }
 
+    #[docs::hidden]
     public const function call(Function $fn, str::text& $out) : void
     {
         standardName($fn, $out);
     }
 
+    #[docs::hidden]
     public const function symbol(Binary $op, str::text& $out) : void
     {
         if ($op == Binary::quot) {
@@ -89,6 +103,7 @@ public struct Mysql : Dialect
         $out->append($op->symbol());
     }
 
+    #[docs::hidden]
     public const function syntax() : Syntax
     {
         return Syntax($backslashes: true, $hashComments: true, $spacedDashes: true, $likeEscape: true);

@@ -10,7 +10,7 @@
 #[module: "hydragen"]
 #[version: "0.1.0"]
 #[sources: "src/*.eco"]
-#[depends: "../../libjson"]
+#[requires: "echolang/libjson" { version: "^0.1", source: git "https://github.com/echolang/libjson" }]
 
 #[target: exe { name: "hydragen", entry: "main.eco" }] {
     #[sources: "main.eco"]

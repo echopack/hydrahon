@@ -1,21 +1,66 @@
 namespace hydrahon;
 
+#[docs::see: ["hydrahon::Sql"]]
+
 /**
  * Where bound parameters go. A driver adapter implements one method per value kind; `Sql::bind`
  * calls them in placeholder order.
  */
 public interface Binder
 {
+    /**
+     * SQL NULL.
+     */
     function none() : void;
+
+    /**
+     * A boolean. MySQL has no real one; an adapter usually sends 0 or 1.
+     */
     function bool(bool $v) : void;
+
+    /**
+     * A signed integer.
+     */
     function int(int64 $v) : void;
+
+    /**
+     * An unsigned integer, for values past the int64 range.
+     */
     function uint(uint64 $v) : void;
+
+    /**
+     * A double.
+     */
     function float(float64 $v) : void;
+
+    /**
+     * An exact decimal, as text. Send it as text or the driver's decimal type, never as a float.
+     */
     function decimal(const Decimal& $v) : void;
+
+    /**
+     * A string.
+     */
     function text(const string& $v) : void;
+
+    /**
+     * Binary data. Drivers that tell text from bytes should send this as bytes.
+     */
     function bytes(const Bytes& $v) : void;
+
+    /**
+     * A calendar date.
+     */
     function date(const Date& $v) : void;
+
+    /**
+     * A date and time, without a timezone.
+     */
     function datetime(const DateTime& $v) : void;
+
+    /**
+     * A time of day, or a signed span.
+     */
     function time(const Time& $v) : void;
 }
 
@@ -38,23 +83,38 @@ public struct Params : contract::const_iterable<const Value>
         return $p;
     }
 
+    /**
+     * How many parameters, which is how many placeholders the text has.
+     */
     public const function count() : usize
     {
         return $this->items->count();
     }
 
+    /**
+     * Walk the parameters in placeholder order: `foreach ($sql->params as const &$v)`.
+     */
     public const function iterate() : slice_iterator<const Value>
     {
         return $this->items->iterate();
     }
 }
 
+#[docs::see: ["hydrahon::Binder", "hydrahon::Dialect"]]
+
 /**
  * A rendered statement: SQL text in one dialect and its parameters in placeholder order.
  */
 public struct Sql
 {
+    /**
+     * The SQL, with placeholders in the dialect's style: `?` or `$1`.
+     */
     public const string $text;
+
+    /**
+     * The values for the placeholders, first placeholder first.
+     */
     public const Params $params;
 
     /**

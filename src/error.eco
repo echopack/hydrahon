@@ -5,18 +5,70 @@ namespace hydrahon;
  */
 public enum Feature
 {
+    /**
+     * RETURNING on insert, update or delete. MySQL refuses it; SQLite needs 3.35.
+     */
     case returning;
+
+    /**
+     * LIMIT on an UPDATE. MySQL only.
+     */
     case updateLimit;
+
+    /**
+     * ORDER BY on an UPDATE. MySQL only.
+     */
     case updateOrder;
+
+    /**
+     * LIMIT on a DELETE. MySQL only.
+     */
     case deleteLimit;
+
+    /**
+     * ORDER BY on a DELETE. MySQL only.
+     */
     case deleteOrder;
+
+    /**
+     * RIGHT JOIN. SQLite needs 3.39.
+     */
     case rightJoin;
+
+    /**
+     * FULL JOIN. MySQL has none; SQLite needs 3.39.
+     */
     case fullJoin;
+
+    /**
+     * An upsert. SQLite needs 3.24.
+     */
     case upsert;
+
+    /**
+     * ORDER BY or LIMIT inside one UNION branch. SQLite refuses it.
+     */
     case compoundOrder;
+
+    /**
+     * WITH in front of an INSERT. MySQL and MariaDB refuse it.
+     */
     case insertWith;
+
+    /**
+     * WITH in front of an UPDATE. MariaDB refuses it.
+     */
     case updateWith;
+
+    /**
+     * WITH in front of a DELETE. MariaDB refuses it.
+     */
     case deleteWith;
+
+    /**
+     * `count()` over DISTINCT or UNION rows that select `*` across a join. MySQL refuses the
+     * repeated column names that makes; list the fields instead.
+     */
     case starCount;
 }
 
@@ -25,16 +77,63 @@ public enum Feature
  */
 public enum Problem
 {
+    /**
+     * An insert without a single `row()`.
+     */
     case noRows;
+
+    /**
+     * An update without a single `set()`.
+     */
     case noAssignments;
+
+    /**
+     * Insert rows that set different columns.
+     */
     case rowShape;
+
+    /**
+     * The same column twice in one row, SET or upsert update.
+     */
     case duplicateColumn;
+
+    /**
+     * An assignment to something that is not a plain column, like `[$u->views + 1 => 3]`,
+     * or `excluded()` outside an upsert.
+     */
     case notAColumn;
+
+    /**
+     * A column of another table where only the target table fits, such as the left side of
+     * a SET.
+     */
     case foreignColumn;
+
+    /**
+     * An upsert update without a conflict target, on Postgres or SQLite, which need one.
+     */
     case conflictTarget;
+
+    /**
+     * A `conflict()` with neither `update()` nor `ignore()`, or with both.
+     */
     case conflictAction;
+
+    /**
+     * Raw SQL whose `?` count differs from its params.
+     */
     case rawParams;
+
+    /**
+     * Division by a literal zero. The servers disagree on what that means, so it never
+     * renders.
+     */
     case divisionByZero;
+
+    /**
+     * A subquery inside an insert reads the target table under its own name, so a column of
+     * the target would silently bind to the subquery's row instead.
+     */
     case hiddenTarget;
 }
 
@@ -43,12 +142,22 @@ public enum Problem
  */
 public enum Error
 {
+    /**
+     * The statement is fine, but this dialect cannot say it. Another dialect might.
+     */
     case unsupported(Feature $feature);
+
+    /**
+     * The statement is wrong in every dialect.
+     */
     case invalid(Problem $problem);
 }
 
 namespace str;
 
+/**
+ * The clause, as a reader would name it: `FULL JOIN`.
+ */
 public function from(const hydrahon::Feature& $f) : string
 {
     return match ($f) {
@@ -68,6 +177,9 @@ public function from(const hydrahon::Feature& $f) : string
     };
 }
 
+/**
+ * What is wrong, in a few words.
+ */
 public function from(const hydrahon::Problem& $p) : string
 {
     return match ($p) {
@@ -85,6 +197,10 @@ public function from(const hydrahon::Problem& $p) : string
     };
 }
 
+/**
+ * `unsupported by this dialect: FULL JOIN` or `invalid statement: insert without rows`. This
+ * is what `"{$e}"` prints.
+ */
 public function from(const hydrahon::Error& $e) : string
 {
     match ($e) {
