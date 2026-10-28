@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04, windows-2022]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: echolang/setup-echo@v1
+
+      - name: Build and test
+        run: echoc test
+
+      # a byte comparison, and the Windows checkout has CRLF line endings
+      - name: Generated operators are current
+        if: runner.os != 'Windows'
+        run: echoc run tools/operators.eco -- --check
+
+  hydragen:
+    name: hydragen
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: echolang/setup-echo@v1
+
+      # cli/module.eco depends on ../../libjson, a checkout next to this one
+      - name: Fetch libjson
+        run: git clone --depth 1 --branch v0.1.3 https://github.com/echolang/libjson.git ../libjson
+
+      - name: Test
+        working-directory: cli
+        run: echoc test
+
+      - name: End to end
+        run: scripts/test-gen.sh
