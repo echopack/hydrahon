@@ -93,8 +93,7 @@ public struct Table : Source
      */
     public function column<T>(const string& $name) : Term<T>
     {
-        uint32 $slot = $this->owner->columns;
-        $this->owner->columns = $slot + 1;
+        uint32 $slot = $this->owner->columns->add(1);
         return Term<T>(.column(Ident($this->owner, $name, $slot)));
     }
 
@@ -112,8 +111,9 @@ public struct Table : Source
  * The table side of a column's identity: schema, table name, whether it is a CTE, and the name
  * that qualifies its columns. One per table handle, shared by every column made from it, so a
  * column costs no allocation of its own and two columns of one handle are told apart from others
- * by identity.
+ * by identity. Columns kept in statics are read by every thread, so the count is atomic.
  */
+#[atomic]
 internal class Owner
 {
     internal const string $table;
@@ -123,7 +123,7 @@ internal class Owner
     // whether `$qualifier` is an alias rather than the table name
     internal const bool $aliased;
     // how many columns were made from this table, which numbers each one
-    internal uint32 $columns = 0;
+    internal atomic<uint32> $columns = atomic<uint32>(0);
 
     /**
      * Whether this and `$other` are the same table or the same CTE, under any qualifier.

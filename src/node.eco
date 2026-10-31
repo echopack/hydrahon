@@ -261,9 +261,13 @@ internal enum Node
     }
 }
 
+// the children are atomic classes: a node in a static column is copied by every thread that
+// builds a query with it
+
 /**
  * The one child of a node.
  */
+#[atomic]
 internal class Operand
 {
     internal const Node $node;
@@ -272,6 +276,7 @@ internal class Operand
 /**
  * The two children of a binary node.
  */
+#[atomic]
 internal class Operands
 {
     internal const Node $left;
@@ -281,6 +286,7 @@ internal class Operands
 /**
  * The children of a node that takes any number of them.
  */
+#[atomic]
 internal class NodeList
 {
     internal const array<Node> $items;

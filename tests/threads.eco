@@ -1,0 +1,42 @@
+use hydrahon::{Select, Mysql, Table, Term};
+use std::thread;
+
+/**
+ * Columns kept in statics, the way generated handles keep theirs: one copy for every thread.
+ */
+internal struct Shared
+{
+    internal static Table $table = Table(name: 'jobs');
+    internal static Term<int64> $id = Shared::$table->column<int64>('id');
+    internal static Term<string> $name = Shared::$table->column<string>('name');
+}
+
+test static_columns_build_queries_on_many_threads
+{
+    array<thread::task<int32>> $workers = array<thread::task<int32>>();
+    foreach (0 .. 8 as $w) {
+        thread::task<int32> $t = guard thread::spawn(function() : int32 {
+            int32 $good = 0;
+            foreach (0 .. 2000 as $i) {
+                int64 $n = $i as int64;
+                Select $q = Select(from: Shared::$table)
+                    ->fields([Shared::$id, Shared::$name])
+                    ->where(Shared::$id >= $n && Shared::$name != 'gone')
+                    ->order([Shared::$id]);
+                hydrahon::Sql $s = guard $q->sql<Mysql>();
+                if ($s->text == 'SELECT `jobs`.`id`, `jobs`.`name` FROM `jobs` WHERE `jobs`.`id` >= ? AND `jobs`.`name` <> ? ORDER BY `jobs`.`id` ASC') {
+                    $good = $good + 1;
+                }
+            }
+            return $good;
+        }) else ($e) {
+            die($e->message());
+        }
+        $workers->push($t);
+    }
+    int32 $total = 0;
+    foreach ($workers as &$t) {
+        $total = $total + $t->wait();
+    }
+    assert($total == 16000);
+}
