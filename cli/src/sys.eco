@@ -14,7 +14,7 @@ public struct Sys
      */
     public static function read(const string& $path) : string
     {
-        return io::readfile($path)->or('');
+        return std::fs::readfile($path)->or('');
     }
 
     /**
@@ -26,7 +26,7 @@ public struct Sys
         if (Sys::read($path) == $text) {
             return true;
         }
-        guard io::writefile($path, $text) else {
+        guard std::fs::writefile($path, $text) else {
             return false;
         }
         return true;

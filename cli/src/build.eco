@@ -73,7 +73,7 @@ public class Generator
         string $text = guard $this->render() else ($e) {
             return .error($e);
         }
-        result<bool, io::ioerror> $made = io::mkdir('.hydrahon');
+        result<bool, io::ioerror> $made = std::fs::mkdir('.hydrahon');
         if ($made->failed() && $made->failure()->exists() == false) {
             return .error(.input('could not create .hydrahon/'));
         }

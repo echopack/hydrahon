@@ -59,7 +59,7 @@ function dump(const string& $name, const Sql& $s) : void
     }
     string::view $d = guard $dir;
     string $path = "{$d}/{$name}.sql";
-    io::file $f = guard io::append($path);
+    io::file $f = guard std::fs::append($path);
     string $line = $s->text;
     $line->push(10);
     guard $f->write($line);

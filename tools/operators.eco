@@ -511,7 +511,7 @@ function splice(const string& $text, const string& $name, const string& $body) :
  */
 function emit(const string& $path, const string& $text, bool $check) : bool
 {
-    string $old = io::readfile($path)->or('');
+    string $old = std::fs::readfile($path)->or('');
     if ($old == $text) {
         return false;
     }
@@ -519,7 +519,7 @@ function emit(const string& $path, const string& $text, bool $check) : bool
         io::eprintln("stale: {$path}");
         return true;
     }
-    guard io::writefile($path, $text);
+    guard std::fs::writefile($path, $text);
     echo "wrote {$path}";
     return false;
 }
@@ -535,7 +535,7 @@ bool $stale = false;
 $stale = emit('src/operators.eco', operators(), $check) || $stale;
 $stale = emit('src/fn.eco', functions(), $check) || $stale;
 
-string $term = guard io::readfile('src/term.eco');
+string $term = guard std::fs::readfile('src/term.eco');
 $term = splice($term, 'expr', conversions('Expr'));
 $term = splice($term, 'field', conversions('Field'));
 $term = splice($term, 'order', conversions('Order'));
